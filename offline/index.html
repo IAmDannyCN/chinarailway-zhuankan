@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>铁路专刊检索</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <svg class="icon-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 4h6a3 3 0 0 1 3 3v14a4 4 0 0 0-4-2H4zM13 7a3 3 0 0 1 3-3h5v15h-4a4 4 0 0 0-4 2"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-left" viewBox="0 0 24 24"><path d="m14 6-6 6 6 6"/></symbol>
+    <symbol id="i-right" viewBox="0 0 24 24"><path d="m10 6 6 6-6 6"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></symbol>
+    <symbol id="i-open" viewBox="0 0 24 24"><path d="M14 3h7v7M21 3l-11 11M10 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H5v18h14V8zM14 3v6h5M8 13h8M8 17h6"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="i-filter" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16M9 4v6M15 14v6"/></symbol>
+  </svg>
+
+  <header class="app-header">
+    <div class="brand"><svg class="icon" aria-hidden="true"><use href="#i-book"/></svg><h1>铁路专刊检索</h1></div>
+    <form id="searchForm" role="search">
+      <div class="search-field">
+        <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+        <input id="query" type="search" aria-label="检索关键词" placeholder="搜索示例：北京通州站；或者：铁运电〔2025〕106号" autocomplete="off">
+      </div>
+      <button class="primary-button" type="submit">搜索</button>
+    </form>
+    <div class="filter-anchor">
+      <button id="filterToggle" class="plain-button" aria-expanded="false" aria-controls="filterPanel"><svg class="icon" aria-hidden="true"><use href="#i-filter"/></svg>筛选<span id="filterCount" class="count" hidden></span><svg class="icon chevron" aria-hidden="true"><use href="#i-down"/></svg></button>
+      <div id="filterPanel" class="filter-panel" hidden>
+        <div class="filter-heading"><strong>筛选</strong><button id="reset" class="text-button">重置</button></div>
+        <div class="filter-row">
+          <select id="yearFrom" aria-label="起始年份"><option value="">起始年份</option></select>
+          <span class="range-separator">—</span>
+          <select id="yearTo" aria-label="截止年份"><option value="">截止年份</option></select>
+        </div>
+        <div class="filter-row">
+          <select id="topic" aria-label="业务类别"><option value="">全部业务</option></select>
+          <select id="kind" aria-label="内容类型"><option value="">全部正文</option><option>文件</option><option>附件</option><option>修改事项</option><option>剪贴页</option><option>目录</option><option value="待核对">按页收录</option></select>
+        </div>
+        <select id="volume" aria-label="专刊"><option value="">全部专刊</option></select>
+      </div>
+    </div>
+    <button id="about" class="plain-button" title="查看专刊">查看专刊 <span id="volumeCount" class="count"></span></button>
+  </header>
+
+  <main class="workspace">
+    <aside id="searchSidebar" class="sidebar" aria-label="检索结果">
+      <div class="results-heading">
+        <h2>结果 <span id="count" class="count">0</span></h2>
+        <select id="sort" aria-label="结果排序"><option value="relevance">匹配优先</option><option value="new">由新到旧</option><option value="old">由旧到新</option></select>
+      </div>
+      <div id="results" class="results" aria-live="polite"></div>
+    </aside>
+
+    <aside id="issueSidebar" class="sidebar" aria-label="本期目录" hidden>
+      <div class="results-heading"><h2>本期目录</h2><button id="backView" class="text-button">后退</button></div>
+      <nav id="issueContents" class="results" aria-label="章节"></nav>
+    </aside>
+
+    <section class="reader" aria-label="原刊预览">
+      <div class="document-bar">
+        <svg class="icon" aria-hidden="true"><use href="#i-file"/></svg>
+        <span id="documentName" class="document-name"></span>
+        <button id="openIssueHere" class="plain-button" title="在本期专刊中查看当前位置">查看本期</button>
+        <button id="copySource" class="icon-button" aria-label="复制出处" title="复制出处"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg></button>
+        <a id="original" class="plain-button" target="_blank" rel="noopener" title="打开原始 PDF">打开原件 <svg class="icon" aria-hidden="true"><use href="#i-open"/></svg></a>
+      </div>
+      <div class="reader-toolbar" aria-label="阅读工具">
+        <div class="tool-group page-controls">
+          <button id="prevPage" class="icon-button" aria-label="上一页" title="上一页"><svg class="icon" aria-hidden="true"><use href="#i-left"/></svg></button>
+          <input id="pageInput" inputmode="numeric" type="text" aria-label="PDF页码" title="PDF页码，按回车跳转">
+          <span class="page-total">/ <span id="pageTotal">—</span></span>
+          <button id="nextPage" class="icon-button" aria-label="下一页" title="下一页"><svg class="icon" aria-hidden="true"><use href="#i-right"/></svg></button>
+        </div>
+        <span class="tool-divider" aria-hidden="true"></span>
+        <div class="tool-group zoom-controls">
+          <button id="zoomOut" class="icon-button" aria-label="减小字号" title="减小字号"><svg class="icon" aria-hidden="true"><use href="#i-minus"/></svg></button>
+          <select id="zoomSelect" aria-label="正文字号"><option value="fit">标准字号</option><option value="0.85">小</option><option value="1">标准</option><option value="1.2">大</option><option value="1.4">特大</option></select>
+          <button id="zoomIn" class="icon-button" aria-label="增大字号" title="增大字号"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg></button>
+        </div>
+        <div id="findControls" class="find-controls" hidden>
+          <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+          <span id="findTerm"></span>
+          <span id="hitCounter" class="hit-counter" aria-live="polite" title="当前匹配 / 匹配总数">0 / 0</span>
+          <button id="prevHit" class="icon-button" aria-label="上一处匹配" title="上一处匹配（Shift+Enter）"><svg class="icon" aria-hidden="true"><use href="#i-up"/></svg></button>
+          <button id="nextHit" class="icon-button" aria-label="下一处匹配" title="下一处匹配（Enter）"><svg class="icon" aria-hidden="true"><use href="#i-down"/></svg></button>
+        </div>
+      </div>
+      <div class="reading-location"><span id="previewTitle"></span><button id="printedPage" type="button" title="在整期中查看当前位置"></button></div>
+      <div id="viewer" class="viewer" tabindex="0" aria-label="原刊页面">
+        <div id="pageStack" class="page-stack" hidden></div>
+        <div id="previewEmpty" class="preview-empty">选择条目</div>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="scopeDialog" aria-labelledby="scopeTitle">
+    <div class="dialog-heading"><h2 id="scopeTitle">查看专刊</h2><button id="closeDialog" class="icon-button" aria-label="关闭"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+    <div id="scopeList"></div>
+    <div id="collectionStats" class="dialog-summary"></div>
+    <p id="reportLink"><a href="入库检查报告.html" target="_blank" rel="noopener">查看入库结果 ↗</a></p>
+  </dialog>
+  <div id="toast" role="status"></div>
+  <script src="data/index.js"></script>
+  <script src="flow.js"></script>
+  <script src="reader.js"></script>
+  <script src="issue.js"></script>
+  <script src="navigation.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

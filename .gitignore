@@ -1,0 +1,16 @@
+.DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+/.更新专刊.lock
+/pdf/*
+!/pdf/.gitkeep
+/新增专刊/*
+!/新增专刊/.gitkeep
+/offline/data/*
+!/offline/data/.gitkeep
+/offline/入库检查报告.html
+/offline/入库统计.json
+/offline/更新状态.json
+/offline/更新错误.json
+/offline/生成记录.json
