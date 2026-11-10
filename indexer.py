@@ -14,9 +14,10 @@ import html
 from difflib import SequenceMatcher
 
 import pymupdf
+from PIL import Image
 
-EXTRACT_VERSION = 7
-SEGMENT_VERSION = 'library-4-html'
+EXTRACT_VERSION = 8
+SEGMENT_VERSION = 'library-5-html'
 CATEGORIES = set('部令 各局处文件 货运 国际联运 客货运输 客、货运输 客运规章 货运规章 客货运管理 运营管理 客运管理 货运管理 货物运价 客货运运价 客货运价里程表 铁路专用线专用铁路名称表 法律文件 法规文件 法律法规 经济法规 价格管理 运输条件 客运运价 货运运价 其他 其它 客运 规章文件 运输组织 客货运输管理'.split())
 CATEGORIES.update(['国务院文件', '其他文件', '铁路运输企业管理', '运输收入', '综合管理'])
 # EU-BZ's embedded ToUnicode table substitutes these Han characters for digits and Latin glyphs.
@@ -55,11 +56,29 @@ def title_key(text):
 
 
 def title_font(line):
-    return 'XBS' in line['fonts'] or '小标宋' in line['fonts']
+    return bool(re.search(r'XBS|XiaoBiaoSong|小标宋', line['fonts'], re.I))
 
 
 def bold_font(line):
     return title_font(line) or 'HT' in line['fonts'] or '黑体' in line['fonts']
+
+
+SIGNOFF_DATE = re.compile(r'^[（(]?([一二三四五六七八九〇○零O0-9]{4})年([一二三四五六七八九十0-9]{1,3})月([一二三四五六七八九十0-9]{1,3})日[）)]?$')
+
+
+def signoff_date(lines, width):
+    for line in reversed(lines):
+        match = SIGNOFF_DATE.fullmatch(line['t'])
+        if not match:
+            continue
+        text = line['t'].strip('()（）')
+        if line['x'] >= width * .44:
+            return text
+        if line is not lines[-1]:
+            continue
+        if len(lines) > 1 and authority_heading(lines[-2]['t']):
+            return text
+    return ''
 
 
 def classify(title, category):
@@ -330,9 +349,16 @@ def segment_document(layout, source, output):
             candidates.append(dict(p=i, a=0, title=title, category=category, kind='剪贴页', confidence='页级分割'))
             continue
         attachments = []
+        margin = min((line['x'] for nearby in pages[max(0, i - 1):i + 1]
+                      if abs(nearby['w'] - page['w']) < 3
+                      for line in nearby['lines'] if len(line['t']) >= 24
+                      and line['right'] - line['x'] > page['w'] * .55), default=page['w'] * .21)
         for k, line in enumerate(lines):
             inline = re.fullmatch(r'(附件[0-9一二三四五六七八九十园员圆猿源缘远苑愿怨]{0,3})[:：](.{3,65})', line['t'])
-            if inline and (bold_font(line) or (page['images'] and line['y'] < page['h'] * .25
+            flush_left = line['x'] <= margin + max(3, line['size'] * .65)
+            before_signoff = inline and any(SIGNOFF_DATE.fullmatch(other['t']) and other['x'] >= page['w'] * .44
+                                            for other in lines[k + 1:k + 4])
+            if inline and not before_signoff and (bold_font(line) or flush_left or (page['images'] and line['y'] < page['h'] * .25
                                               and inline[2].endswith(('图', '图样', '表')))):
                 label = inline[1]
                 if 'EU-' in line['fonts']:
@@ -357,19 +383,27 @@ def segment_document(layout, source, output):
             if attached:
                 continue
             preceding = [line for line in lines if line['b'] <= start]
+            reference, issuer = [], []
             for line in reversed(preceding):
                 if line['t'] in CATEGORIES:
                     start = min(start, line['a'])
                     break
-                if (reference_line(line['t']) and len(line['t']) < 70) or (
-                        bold_font(line) and len(line['t']) < 45 and authority_heading(line['t'])) or re.fullmatch(r'\([^)]{1,30}\)', line['t']):
+                if not issuer and reference_line(line['t']) and len(line['t']) < 70:
+                    reference.insert(0, line['t'])
+                    start = min(start, line['a'])
+                elif len(line['t']) < 45 and authority_heading(line['t']) and (
+                        bold_font(line) or reference and line['size'] > first['size'] * 1.08):
+                    issuer.insert(0, line['t'])
+                    start = min(start, line['a'])
+                elif re.fullmatch(r'\([^)]{1,30}\)', line['t']):
                     start = min(start, line['a'])
                 else:
                     break
             prefix = text[:start]
             if title in prefix and re.search(r'现予公布|现公布|现予发布|予以公布|制定', prefix) and not any(c['p'] == i for c in candidates):
                 start = 0
-            candidates.append(dict(p=i, a=start, title=title, category=category, kind='文件', confidence='标题版式识别'))
+            candidates.append(dict(p=i, a=start, title=title, category=category, kind='文件', confidence='标题版式识别',
+                                   reference='／'.join(reference), issuer='／'.join(issuer)))
         # Correction tables and modification lists use body or bold fonts in several eras.
         for line in lines:
             if not (line['y'] < 140 and len(line['t']) < 65):
@@ -500,7 +534,7 @@ def segment_document(layout, source, output):
                                if candidate['a'] <= line['a'] < candidate['a'] + 180)
         number = REFERENCE.search(first_text)
         entry = dict(candidate, id=f'{ident}-{len(entries)}', parts=parts,
-                     number=number[0] if number else '', topic=classify(candidate['title'], candidate['category']))
+                     number=candidate.get('reference') or (number[0] if number else ''), topic=classify(candidate['title'], candidate['category']))
         entry['title'] = heading_text(entry['title'])
         # Some facing-page tables print their caption across the two halves.
         if (entry['kind'] == '附件' and entry['title'].endswith('直通') and len(parts) > 1
@@ -523,6 +557,18 @@ def segment_document(layout, source, output):
                 and not entry['number']):
             entry['kind'] = '修改事项'
             entry['confidence'] = '独立修改事项'
+        if (entry['kind'] == '文件' and parent and not entry['number'] and not entry.get('issuer')):
+            previous = entries[-1]
+            part = previous['parts'][-1]
+            prior_page = pages[part['p']]
+            tail = [line for line in prior_page['lines'] if part['a'] <= line['a'] < part['b']
+                    and not line['t'].isdigit()][-6:]
+            title = entry['title']
+            referenced = any(re.search(r'附件.{0,16}' + re.escape(title),
+                                       pages[p['p']]['t'][p['a']:p['b']]) for p in parent['parts'])
+            if (part['p'] >= entry['p'] - 1 and signoff_date(tail, prior_page['w'])
+                    and (referenced or re.match(r'^附[表录图]', title))):
+                entry.update(kind='附件', attachmentLabel='附件', confidence='落款及附件标题识别')
         if entry['kind'] == '附件':
             attachment_parent = parent
             if not attachment_parent or attachment_parent['kind'] == '修改事项':
@@ -576,6 +622,15 @@ def segment_document(layout, source, output):
                         warnings.append(dict(type='未识别边界', page=i + 1, title=fragment[:70]))
             last = max(last, finish)
     for entry in entries:
+        if entry['kind'] == '文件':
+            for part in reversed(entry['parts']):
+                original = pages[part['p']]
+                lines = [line for line in original['lines'] if part['a'] <= line['a'] < part['b']
+                         and not line['t'].isdigit()]
+                date = signoff_date(lines[-12:], original['w'])
+                if date:
+                    entry['date'] = date
+                    break
         if entry['kind'] in ['文件', '修改事项', '附件'] and len(entry['parts']) > 40:
             warnings.append(dict(type='长文件', page=entry['p'] + 1, title=entry['title'], pages=len(entry['parts'])))
     for i, page in enumerate(pages):
@@ -655,16 +710,20 @@ def write_layout(path, layout):
 def readpage(page, ignore_image_blocks=False):
     lines = []
     rotation = page.rotation_matrix if page.rotation else None
-    flags = pymupdf.TEXTFLAGS_RAWDICT
+    flags = pymupdf.TEXTFLAGS_RAWDICT | pymupdf.TEXT_COLLECT_STYLES
+    uncertain = bool(rotation)
     if ignore_image_blocks:
         flags &= ~pymupdf.TEXT_PRESERVE_IMAGES
     for block in page.get_text('rawdict', flags=flags)['blocks']:
         for line in block.get('lines', []):
             chars, fonts, sizes, special = [], [], [], ''
+            uncertain |= abs(line['dir'][1]) > .02 or line['dir'][0] < .99
             for span in line['spans']:
                 font = fontname(span['font'])
                 fonts.append(font)
                 sizes.append(span['size'])
+                style = (int(bool(span['flags'] & 16 or bold_font({'fonts': font})))
+                         | 2 * int(bool(span.get('char_flags', 0) & 2)))
                 if 'KT' in font or '楷' in font:
                     special += ''.join(norm(c['c']) for c in span['chars'])
                 for char in span['chars']:
@@ -682,7 +741,8 @@ def readpage(page, ignore_image_blocks=False):
                     for character in norm(value):
                         display_value=unicodedata.normalize('NFKC', value)
                         display_character=display_value if len(display_value)==1 and display_value.lower()==character else character
-                        chars.append([character, round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2), display_character])
+                        chars.append([character, round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2),
+                                      display_character, style, round(span['size'], 2)])
             if chars:
                 lines.append(dict(t=''.join(c[0] for c in chars), chars=chars,
                     y=min(c[2] for c in chars), bottom=max(c[4] for c in chars),
@@ -704,6 +764,7 @@ def readpage(page, ignore_image_blocks=False):
         else:
             merged.append(line)
     chars = []
+    styles = []
     for line in merged:
         if rotation:
             line['chars'].sort(key=lambda character: character[1])
@@ -711,6 +772,10 @@ def readpage(page, ignore_image_blocks=False):
         line['a'] = len(chars)
         chars += line.pop('chars')
         line['b'] = len(chars)
+        for offset in range(line['a'], line['b']):
+            style, size = chars[offset][6:]
+            if not styles or styles[-1][1:] != [style, size]:
+                styles.append([offset, style, size])
         line.pop('baseline')
     text = ''.join(c[0] for c in chars)
     top = ''.join(c[0] for c in sorted([c for c in chars if c[2] < 60], key=lambda c: c[1]))
@@ -733,7 +798,8 @@ def readpage(page, ignore_image_blocks=False):
     boxes = [[round(c[1] / page.rect.width * 100, 3), round(c[2] / page.rect.height * 100, 3),
               round((c[3] - c[1]) / page.rect.width * 100, 3), round((c[4] - c[2]) / page.rect.height * 100, 3)] for c in chars]
     return dict(w=round(page.rect.width, 2), h=round(page.rect.height, 2), t=text,
-                lines=merged, label=label, rotated=bool(rotation), images=len(page.get_images()), display=''.join(c[5] for c in chars)), boxes
+                lines=merged, label=label, rotated=bool(rotation), images=len(page.get_images()), display=''.join(c[5] for c in chars),
+                styles=styles, uncertain=uncertain), boxes
 
 
 def restore_gbk_cmaps(pdf):
@@ -761,16 +827,13 @@ def extract_document(source, output):
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
     ident, folder = storage_identity(source, output, digest)
     cache = folder / 'layout.json.gz'
-    old = None
     if cache.exists():
         with gzip.open(cache, 'rt', encoding='utf8') as stream:
             saved = json.load(stream)
-        if (saved.get('digest') == digest and saved.get('extract_version') in (6, EXTRACT_VERSION)
+        if (saved.get('digest') == digest and saved.get('extract_version') == EXTRACT_VERSION
                 and all((folder / f'{i + 1}.coords.js').exists() or (folder / f'{i + 1}.page.js').exists()
                         for i in range(len(saved['pages'])))):
-            if saved['extract_version'] == EXTRACT_VERSION:
-                return saved
-            old = saved
+            return saved
     pages = []
     pymupdf.TOOLS.mupdf_display_errors(False)
     pymupdf.TOOLS.mupdf_display_warnings(False)
@@ -778,8 +841,6 @@ def extract_document(source, output):
     with pymupdf.open(source) as pdf:
         repaired = restore_gbk_cmaps(pdf)
         changed_geometry = bool(repaired) or any(page.rotation for page in pdf)
-        if old is not None and not changed_geometry:
-            return old
         toc = [[level, title.encode('utf-16','surrogatepass').decode('utf-16','replace'), number] for level,title,number in pdf.get_toc()]
         for number, page in enumerate(pdf):
             layout, boxes = readpage(page, ignore_image_blocks=changed_geometry)
@@ -938,20 +999,23 @@ def write_page_asset(path, key, coords, markup):
     writejs(path, f'window.PAGE_PACKED[{json.dumps(key)}]=', packed)
 
 
-def render_document(source, output, entries=None, layout=None):
-    """Build selectable reading pages with embedded figures and facsimiles of complex forms."""
+def write_original_page(page, path):
+    if not path.is_file():
+        temporary = path.with_suffix('.webp.tmp')
+        zoom = 1350 / max(page.rect.width, page.rect.height)
+        pixmap = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+        image = Image.frombytes('RGB', (pixmap.width, pixmap.height), pixmap.samples)
+        image.save(temporary, 'WEBP', lossless=True, method=1)
+        temporary.replace(path)
+
+
+def render_document(source, output, layout=None):
+    """Build selectable text, rules, coordinates and original-page images."""
     source, output = Path(source), Path(output)
     if layout is None:
         layout = extract_document(source, output)
     folder = output / 'data' / layout['id']
-    if entries is None:
-        entries = segment_document(layout, source, output)['entries']
-    part_signature = hashlib.sha256(json.dumps(
-        [entry['parts'] for entry in entries], separators=(',', ':')
-    ).encode()).hexdigest()
-    spec = dict(digest=layout['digest'], format='html-text-6', pages=len(layout['pages']), partsHash=part_signature)
-    if any('display' not in page for page in layout['pages']):
-        spec['legacyDisplay'] = 'index-aligned'
+    spec = dict(digest=layout['digest'], format='html-text-7', pages=len(layout['pages']))
     manifest = folder / 'html.json'
     saved = json.loads(manifest.read_text()) if manifest.exists() else {}
     same_render = all(saved.get(key) == value for key, value in spec.items())
@@ -959,7 +1023,8 @@ def render_document(source, output, entries=None, layout=None):
     spec['encoding'] = 'gzip'
     media_pages = set(saved.get('mediaPages', [])) if same_render else set()
     paths = [folder / f'{i+1}.page.js' for i in range(spec['pages'])]
-    complete = all(path.is_file() for path in paths)
+    originals = [folder / f'{i+1}.original.webp' for i in range(spec['pages'])]
+    complete = all(path.is_file() and original.is_file() for path, original in zip(paths, originals))
     if reusable and complete:
         return source.name, 0, 0
     started = time.monotonic()
@@ -972,12 +1037,9 @@ def render_document(source, output, entries=None, layout=None):
         atomic_text(manifest, json.dumps(dict(spec, mediaPages=sorted(media_pages))))
         return source.name, len(paths), round(time.monotonic() - started, 1)
     rendered=0
-    parts_by_page = collections.defaultdict(list)
-    for entry in entries:
-        for part in entry['parts']:
-            parts_by_page[part['p']].append(part)
     with pymupdf.open(source) as pdf:
         for i, page in enumerate(pdf):
+            write_original_page(page, originals[i])
             path = paths[i]
             key = f'{layout["id"]}:{i}'
             if same_render and path.is_file():
@@ -1000,41 +1062,53 @@ def render_document(source, output, entries=None, layout=None):
             boxes = json.loads(coordinate_json)
             elements = []
             drawings = page.get_drawings() if not page.rotation else []
+            source_only = (data['uncertain'] or not data['t'] or bool(page.get_image_info())
+                           or bool(re.search(r'[\ue000-\uf8ff\ufffd]', display))
+                           or any(kind == 'fill-shade' for kind, _ in page.get_bboxlog()))
             for drawing in drawings:
                 commands = []
                 for item in drawing['items']:
                     if item[0] == 'l':
-                        a,b = item[1:3]; commands.append(f'M{a.x:.2f},{a.y:.2f}L{b.x:.2f},{b.y:.2f}')
+                        a,b = item[1:3]
+                        source_only |= min(abs(a.x - b.x), abs(a.y - b.y)) > .6
+                        commands.append(f'M{a.x:.2f},{a.y:.2f}L{b.x:.2f},{b.y:.2f}')
                     elif item[0] == 're':
                         r=item[1]; commands.append(f'M{r.x0:.2f},{r.y0:.2f}h{r.width:.2f}v{r.height:.2f}h{-r.width:.2f}Z')
-                    elif item[0] == 'c':
-                        a,b,c,d=item[1:]; commands.append(f'M{a.x:.2f},{a.y:.2f}C{b.x:.2f},{b.y:.2f} {c.x:.2f},{c.y:.2f} {d.x:.2f},{d.y:.2f}')
+                    else:
+                        source_only = True
                 if commands:
                     elements.append('<path d="'+''.join(commands)+'" fill="none" stroke="#555" stroke-width="'+str(max(.2,drawing.get('width') or .3))+'"/>')
+            styles = iter(data['styles'])
+            next_style = next(styles, None)
+            style, size = 0, 10
             for line in data['lines']:
                 coords=boxes[line['a']:line['b']]
                 runs=[]
                 for position,box in enumerate(coords):
+                    changed_style = next_style is not None and next_style[0] == line['a'] + position
+                    if changed_style:
+                        _, style, size = next_style
+                        next_style = next(styles, None)
                     if runs:
-                        previous=coords[runs[-1][-1]]
+                        previous=coords[runs[-1][2][-1]]
                         gap=(box[0]-previous[0]-previous[2])*data['w']/100
                         same_row=abs(box[1]-previous[1])*data['h']/100 < line['size']*.55
-                    if not runs or gap>line['size']*.35 or gap < -line['size']*.4 or not same_row: runs.append([])
-                    runs[-1].append(position)
-                family='sans-serif' if bold_font(line) else 'serif'
-                weight='bold' if bold_font(line) else 'normal'
-                for run in runs:
+                    if not runs or changed_style or gap>line['size']*.35 or gap < -line['size']*.4 or not same_row:
+                        runs.append((style, size, []))
+                    runs[-1][2].append(position)
+                for style, size, run in runs:
                     first,last=coords[run[0]],coords[run[-1]]
                     x=round(first[0]*data['w']/100,2)
                     y=round((first[1]+first[3]*.82)*data['h']/100,2)
                     width=round((last[0]+last[2]-first[0])*data['w']/100,2)
                     value=display[line['a']+run[0]:line['a']+run[-1]+1]
-                    elements.append(f'<text x="{x}" y="{y}" data-line="{line["a"]}" textLength="{max(.1,width)}" lengthAdjust="spacingAndGlyphs" font-size="{line["size"]}" font-family="{family}" font-weight="{weight}">'+html.escape(value)+'</text>\n')
-            svg=f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {data["w"]} {data["h"]}" class="text-page">'+''.join(elements)+'</svg>'
-            media = page_media(page, data, drawings, parts_by_page[i])
-            if media:
+                    weight = 'bold' if style & 1 else 'normal'
+                    underline = ' text-decoration="underline"' if style & 2 else ''
+                    elements.append(f'<text x="{x}" y="{y}" data-line="{line["a"]}" textLength="{max(.1,width)}" font-size="{size}" font-weight="{weight}"{underline}>'+html.escape(value)+'</text>\n')
+            fallback = ' data-source="true"' if source_only else ''
+            svg=f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {data["w"]} {data["h"]}" class="text-page"{fallback}>'+''.join(elements)+'</svg>'
+            if source_only:
                 media_pages.add(i)
-                svg += media
             else:
                 media_pages.discard(i)
             write_page_asset(path, key, coordinate_json, svg)

@@ -1,5 +1,7 @@
 'use strict';
 
+const readingCoordinates = new Map();
+
 function loadReadingPage(document, number) {
   const key = `${document.id}:${number}`;
   if (window.PAGE_HTML[key]) return Promise.resolve(window.PAGE_HTML[key]);
@@ -15,12 +17,20 @@ function loadReadingPage(document, number) {
           const bytes = Uint8Array.from(atob(packed), character => character.charCodeAt(0));
           const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
           const decoded = await new Response(stream).text();
-          window.PAGE_HTML[key] = decoded.slice(decoded.indexOf('\n') + 1);
+          const separator = decoded.indexOf('\n');
+          readingCoordinates.set(key, JSON.parse(decoded.slice(0, separator)));
+          window.PAGE_HTML[key] = decoded.slice(separator + 1);
+        } else {
+          readingCoordinates.set(key, window.PAGE_COORDS[key] || []);
         }
         const markup = window.PAGE_HTML[key];
         if (!markup) throw new Error('阅读数据为空');
         coordinateOrder.push(key);
-        while (coordinateOrder.length > 30) delete window.PAGE_HTML[coordinateOrder.shift()];
+        while (coordinateOrder.length > 30) {
+          const oldest = coordinateOrder.shift();
+          readingCoordinates.delete(oldest);
+          delete window.PAGE_HTML[oldest];
+        }
         resolve(markup);
       } catch (error) {
         reject(error);
@@ -92,7 +102,7 @@ function decodeFlow(document, number, markup) {
   let offset=0;
   const runs=[...xml.querySelectorAll('text')].map(node=>{
     const text=node.textContent,a=offset;offset+=text.length;
-    return {text,a,b:offset,line:node.getAttribute('data-line'),x:Number(node.getAttribute('x')),y:Number(node.getAttribute('y')),width:Number(node.getAttribute('textLength')),size:Number(node.getAttribute('font-size')),bold:node.getAttribute('font-weight')==='bold',p:number};
+    return {text,a,b:offset,line:node.getAttribute('data-line'),x:Number(node.getAttribute('x')),y:Number(node.getAttribute('y')),width:Number(node.getAttribute('textLength')),size:Number(node.getAttribute('font-size')),bold:node.getAttribute('font-weight')==='bold',underline:node.getAttribute('text-decoration')==='underline',p:number};
   });
   const media = [...markup.slice(end).matchAll(
     /<img data-kind="(layout|image)"(?: data-owner="(\d+)")? data-a="(\d+)" data-b="(\d+)" width="(\d+)" height="(\d+)" src="(data:image\/png;base64,[A-Za-z0-9+/=]+)">/g
@@ -100,11 +110,28 @@ function decodeFlow(document, number, markup) {
     type: 'media', kind, owner: owner == null ? null : Number(owner),
     a: Number(a), b: Number(b), width: Number(width), height: Number(height), p: number, src
   }));
-  return {runs, media, rules:[...xml.querySelectorAll('path')].map(n=>n.getAttribute('d')),width:document.sizes[number][0],height:document.sizes[number][1]};
+  const rules = [...xml.querySelectorAll('path')].map(node => node.getAttribute('d'));
+  if (document.originalPages) verifyReadingUnderlines(runs, rules);
+  return {runs, media, rules,
+    sourceOnly: xml.documentElement.dataset?.source === 'true' || xml.documentElement.getAttribute('data-source') === 'true',
+    coordinates: readingCoordinates.get(`${document.id}:${number}`) || [],
+    width:document.sizes[number][0],height:document.sizes[number][1]};
 }
 
-function readingPartBlocks(decoded, part, title, pageLength) {
+function readingPartBlocks(decoded, part, entry, original = false) {
   const {runs, rules, width, height} = decoded;
+  const document = entry.document;
+  const pageLength = document.texts[part.p].length;
+  const title = entry.heading === false ? '' : entry.title;
+  if (document.originalPages) {
+    const source = () => [originalBlock(document, part, decoded, original)];
+    if (original || decoded.sourceOnly) {
+      return [originalBlock(document, {p: part.p, a: 0, b: pageLength}, decoded, true)];
+    }
+    if (['目录', '待核对'].includes(entry.kind)) return source();
+    const fresh = articleBlocks(runs, rules, width, height, {...part, strict: true}, title);
+    return canDisplayReadingPart(fresh, decoded, part) ? fresh : source();
+  }
   const media = decoded.media.filter(item =>
     item.owner == null
       ? item.a >= part.a && (item.a < part.b || item.a === part.b && part.b === pageLength)
@@ -122,6 +149,29 @@ function readingPartBlocks(decoded, part, title, pageLength) {
   return blocks;
 }
 
+function originalBlock(document, part, decoded, wholePage) {
+  const {coordinates, runs, width, height} = decoded;
+  let top = 0, bottom = 100;
+  if (!wholePage && part.a < part.b && (part.a > 0 || part.b < coordinates.length)) {
+    const before = coordinates.slice(0, part.a).reduce((y, box) => Math.max(y, box[1] + box[3]), 0);
+    const after = coordinates.slice(part.b).reduce((y, box) => Math.min(y, box[1]), 100);
+    const [min, max] = coordinates.slice(part.a, part.b).reduce(([a, b], box) =>
+      [Math.min(a, box[1]), Math.max(b, box[1] + box[3])], [100, 0]);
+    if (before <= min && max <= after) {
+      top = (before + min) / 2;
+      bottom = (after + max) / 2;
+      if (!part.a) top = 0;
+      if (part.b === coordinates.length) bottom = 100;
+    }
+  }
+  const anchors = document.entries.filter(entry => entry.p === part.p && entry.a > part.a && entry.a < part.b)
+    .map(entry => ({a: entry.a, y: coordinates[entry.a]?.[1]})).filter(anchor => anchor.y != null);
+  return {...part, type: 'source', width, height, top, bottom, coordinates,
+    anchors,
+    runs: sliceReadingRuns(runs, part.a, part.b), text: document.texts[part.p].slice(part.a, part.b),
+    src: `data/${document.id}/${part.p + 1}.original.webp`, original: originalURL(document, part.p)};
+}
+
 function partsWithImagePages(entry) {
   const media = new Set(entry.document.mediaPages || []);
   if (!media.size) return entry.parts;
@@ -136,8 +186,7 @@ function partsWithImagePages(entry) {
   });
   return parts;
 }
-function inlineRuns(runs) {
-  const text=runs.map(r=>r.text).join('');
+function readingMatches(text) {
   let normalized='',offset=0;
   const mapping=[];
   for(const ch of text){const value=normalize(ch);normalized+=value;for(let i=0;i<value.length;i++)mapping.push([offset,offset+ch.length]);offset+=ch.length;}
@@ -146,11 +195,37 @@ function inlineRuns(runs) {
   ranges.sort((a,b)=>a[0]-b[0]);
   const merged=[];
   for(const [a,b] of ranges){const last=merged.at(-1);if(last && a<last[1])last[1]=Math.max(last[1],b);else merged.push([a,b]);}
-  function slice(a,b){let pos=0,out='';for(const run of runs){const start=Math.max(0,a-pos),end=Math.min(run.text.length,b-pos);if(end>start)out+=`<span data-page="${run.p}" data-offset="${run.a+start}">${escapeHtml(run.text.slice(start,end).replace(/\ue010/g,'.').replace(/\ue5d2/g,'~'))}</span>`;pos+=run.text.length;if(pos>=b)break;}return out;}
+  return merged;
+}
+
+function inlineRuns(runs) {
+  const text = runs.map(run => run.text).join('');
+  const merged = readingMatches(text);
+  function slice(a,b){let pos=0,out='';for(const run of runs){const start=Math.max(0,a-pos),end=Math.min(run.text.length,b-pos);if(end>start)out+=`<span data-page="${run.p}" data-offset="${run.a+start}"${run.bold ? ' class="reading-bold"' : ''}${run.underline ? ' style="text-decoration:underline"' : ''}>${escapeHtml(run.text.slice(start,end))}</span>`;pos+=run.text.length;if(pos>=b)break;}return out;}
   function location(at){let pos=0;for(const run of runs){if(at<pos+run.text.length)return {p:run.p,a:run.a+at-pos};pos+=run.text.length;}return {p:0,a:0};}
   let cursor=0,out='';
   for(const [a,b] of merged){const loc=location(a);out+=slice(cursor,a)+`<mark data-page="${loc.p}" data-offset="${loc.a}">${slice(a,b)}</mark>`;cursor=b;}
   return out+slice(cursor,text.length);
+}
+
+function originalHighlights(block) {
+  const {coordinates, a, p, top, bottom} = block;
+  const cropped = bottom - top;
+  const position = ([x, y, w, h]) => `left:${x}%;top:${(y - top) / cropped * 100}%;width:${w}%;height:${h / cropped * 100}%`;
+  return readingMatches(block.text).map(([start, end]) => {
+    const rects = [];
+    for (const box of coordinates.slice(a + start, a + end)) {
+      if (box[2] <= 0 || box[3] <= 0) continue;
+      const prior = rects.at(-1);
+      if (prior && Math.abs(prior[1] - box[1]) < Math.min(prior[3], box[3]) * .35
+          && box[0] >= prior[0] && box[0] <= prior[0] + prior[2] + .55) {
+        prior[2] = Math.max(prior[2], box[0] + box[2] - prior[0]);
+        prior[3] = Math.max(prior[3], box[1] + box[3] - prior[1]);
+      } else rects.push(box.slice());
+    }
+    return rects.map((rect, i) =>
+      `<${i ? 'i' : 'mark data-page="' + p + '" data-offset="' + (a + start) + '"'} class="source-highlight" data-hit="${a + start}" style="${position(rect)}"></${i ? 'i' : 'mark'}>`).join('');
+  }).join('');
 }
 function tableHTML(block, grouped = false) {
   if (block.type === 'table-series') {
@@ -243,6 +318,25 @@ function blocksHTML(blocks) {
     if (block.type.startsWith('table')) return tableHTML(block);
     if (block.type === 'parameters') return '<dl class="article-parameters">' + block.rows.map(row =>
       `<dt>${inlineRuns(row.label)}</dt><dd>${inlineRuns(row.value)}</dd>`).join('') + '</dl>';
+    if (block.type === 'source') {
+      const {top, bottom, width, height} = block;
+      const scale = 10000 / (bottom - top);
+      const lines = [];
+      for (const run of block.runs) {
+        if (lines.length && lines.at(-1)[0].line === run.line) lines.at(-1).push(run);
+        else lines.push([run]);
+      }
+      const transcription = lines.map(line => line.map(run => escapeHtml(run.text)).join('')).join('\n');
+      return `<figure class="article-figure source-page" data-page="${block.p}" data-offset="${block.a}">
+        <div class="source-sheet" style="aspect-ratio:${width}/${height * (bottom - top) / 100}">
+          <img src="${block.src}" style="top:${-top * scale / 100}%;height:${scale}%" alt="PDF 第 ${block.p + 1} 页" loading="lazy" decoding="async">
+          ${block.anchors.map(({a, y}) => `<span class="source-anchor" data-page="${block.p}" data-offset="${a}" style="top:${(y - top) * scale / 100}%"></span>`).join('')}
+          <div class="source-highlights" aria-hidden="true">${originalHighlights(block)}</div>
+        </div>
+        <figcaption><a href="${escapeHtml(block.original)}" target="_blank" rel="noopener">原版面 · PDF ${block.p + 1}</a></figcaption>
+        ${lines.length ? '<details class="figure-text"><summary>可复制文字</summary><div class="source-transcript">' + transcription + '</div></details>' : ''}
+      </figure>`;
+    }
     if (block.type === 'media') {
       const label = block.kind === 'layout' ? '原版式' : '原图';
       const lines = [];
@@ -256,11 +350,14 @@ function blocksHTML(blocks) {
         <img width="${block.width}" height="${block.height}" src="${block.src}" alt="${label}，PDF 第 ${block.p + 1} 页" loading="lazy" decoding="async">
         <figcaption>${label} · PDF ${block.p + 1} 页</figcaption>${text}</figure>`;
     }
-    const tag = block.type === 'heading' ? 'h3' : 'p';
-    return `<${tag}${block.type === 'metadata' ? ' class="article-note"' : ''}>${inlineRuns(block.runs)}</${tag}>`;
+    const tag = block.type === 'document-title' ? 'h2' : block.type === 'heading' ? 'h3' : 'p';
+    const className = block.centered ? 'reading-centered' : block.type === 'annotation' ? 'reading-annotation'
+      : block.type === 'line' ? 'reading-line' : block.type === 'metadata' ? 'article-note' : '';
+    const style = block.type === 'line' ? ` style="--line-indent:${block.indent}em"` : '';
+    return `<${tag} class="${className}"${style}>${inlineRuns(block.runs)}</${tag}>`;
   }).join('');
 }
-async function renderReadingSection(entry, serial, wholeIssue = false) {
+async function renderReadingSection(entry, serial, wholeIssue = false, original = false, shownSources = new Set()) {
   const blocks=[],imagePages=new Set();
   let previousPage = -2;
   for(const part of wholeIssue ? entry.parts : partsWithImagePages(entry)){
@@ -268,8 +365,19 @@ async function renderReadingSection(entry, serial, wholeIssue = false) {
     if (serial !== renderSerial) return;
     const decoded = decodeFlow(entry.document, part.p, markup);
     if (markup.includes('image-note')) imagePages.add(part.p + 1);
-    const fresh = readingPartBlocks(decoded, part, entry.heading === false ? '' : entry.title, entry.document.texts[part.p].length);
-    if (part.p === previousPage + 1) joinTableContinuation(blocks.at(-1), fresh);
+    const fresh = readingPartBlocks(decoded, part, entry, original);
+    if (fresh[0]?.type === 'source' && fresh[0].a === 0 && fresh[0].b === entry.document.texts[part.p].length) {
+      if (shownSources.has(part.p)) continue;
+      shownSources.add(part.p);
+    }
+    if (part.p === previousPage + 1) joinTableContinuation(blocks.at(-1), fresh, !!entry.document.originalPages);
+    for (let i = 0; i < fresh.length - 1; i++) {
+      if (!fresh[i].type.startsWith('table')) continue;
+      const rest = fresh.slice(i + 1);
+      const count = rest.length;
+      joinTableContinuation(fresh[i], rest, !!entry.document.originalPages);
+      fresh.splice(i + 1, count, ...rest);
+    }
     previousPage = part.p;
     const last=blocks.at(-1),first=fresh[0];
     if (last?.type === 'paragraph' && first?.type === 'paragraph' &&
@@ -281,8 +389,9 @@ async function renderReadingSection(entry, serial, wholeIssue = false) {
   }
   if(serial!==renderSerial)return;
   const section=window.document.createElement('section');section.className='article-section';section.dataset.entry=entry.id;
-  section.innerHTML = (entry.heading !== false && (wholeIssue || entry.parentId)
-    ? `<h2 data-page="${entry.p}" data-offset="${entry.a}">${entry.parentId ? '<small>附件</small>' : ''}${escapeHtml(entry.title)}</h2>` : '')
+  const hasTitle = blocks[0]?.type === 'source' || blocks.some(block => block.type === 'document-title');
+  section.innerHTML = (!hasTitle && entry.heading !== false && (wholeIssue || entry.parentId || entry.document.originalPages)
+    ? `<h2 data-page="${entry.p}" data-offset="${entry.a}">${entry.parentId ? '<small>' + escapeHtml(entry.attachmentLabel || '附件') + '</small>' : ''}${escapeHtml(entry.title)}</h2>` : '')
     + blocksHTML(blocks) + (imagePages.size ? `<p class="article-note">PDF 第 ${[...imagePages].join('、')} 页含原始图像，请查看原件。</p>` : '')
     + (wholeIssue && !blocks.length && entry.heading === false
       ? `<p class="article-note" data-page="${entry.p}" data-offset="${entry.a}">PDF 第 ${entry.p + 1} 页</p>` : '')
@@ -297,7 +406,8 @@ function fitPositionedText(section) {
 }
 
 async function selectEntry(id, targetPage, restoreScroll, restoreHit) {
-  const chosen=entries.find(e=>e.id===id);if(!chosen)return;
+  const chosen=entries.find(e=>e.id===id) || results.find(result => result.entry.id === id)?.entry;
+  if(!chosen)return;
   selected=chosen;readerDocument=chosen.document;const serial=++renderSerial;
   const root=entries.find(e=>e.id===(chosen.parentId||chosen.id))||chosen;
   articleFamily=[root,...entries.filter(e=>e.parentId===root.id)].sort((a,b)=>a.p-b.p||a.a-b.a);
@@ -305,12 +415,14 @@ async function selectEntry(id, targetPage, restoreScroll, restoreHit) {
   for(const button of $('results').querySelectorAll('.result')){button.classList.toggle('active',button.dataset.id===id);button.setAttribute('aria-pressed',String(button.dataset.id===id));}
   $('documentName').textContent=readerDocument.file;$('previewTitle').textContent=root.title;
   $('pageStack').hidden=false;$('previewEmpty').hidden=true;
-  $('pageStack').innerHTML=`<article class="reading-article"><header><div class="article-meta">${readerDocument.year} 年 · ${escapeHtml(readerDocument.issue)}</div><h1>${escapeHtml(root.title)}</h1><div class="article-meta">${escapeHtml(root.number||'')}<span>PDF ${root.p+1}—${root.parts.at(-1).p+1} 页</span></div></header><div class="article-loading">正在读取正文…</div></article>`;
+  const legacyHeading = readerDocument.originalPages ? '' : `<h1>${escapeHtml(root.title)}</h1>`;
+  $('pageStack').innerHTML=`<article class="reading-article"><header><div class="article-meta">${readerDocument.year} 年 · ${escapeHtml(readerDocument.issue)}</div>${legacyHeading}<div class="article-meta">PDF ${root.p+1}—${root.parts.at(-1).p+1} 页</div></header><div class="article-loading">正在读取正文…</div></article>`;
   $('viewer').scrollTop=0;updateZoom(false);updateReadingPosition();
   try {
     const article=$('pageStack').firstElementChild;
+    const shownSources = new Set();
     for(const entry of articleFamily){
-      const section = await renderReadingSection(entry, serial);
+      const section = await renderReadingSection(entry, serial, false, !!entry.sourcePage, shownSources);
       if (!section || serial !== renderSerial) return;
       article.querySelector('.article-loading')?.remove();
       article.append(section);
@@ -321,18 +433,30 @@ async function selectEntry(id, targetPage, restoreScroll, restoreHit) {
     if (restoreScroll != null) {
       if (Number.isInteger(restoreHit) && restoreHit >= 0 && restoreHit < hits.length) {
         hitIndex = restoreHit;
-        articleMarks[hitIndex].classList.add('current');
+        setActiveHit();
       }
       $('viewer').scrollTop = restoreScroll;
     } else if (targetPage != null) {
       scrollReaderTo(article.querySelector(`[data-page="${targetPage}"]`));
     } else if(hitIndex>=0)focusHit();
-    else scrollReaderTo(article.querySelector(`[data-entry="${chosen.id}"]`));
+    else scrollReaderTo(article.querySelector(`.source-anchor[data-page="${chosen.p}"][data-offset="${chosen.a}"]`)
+      || article.querySelector(`[data-entry="${chosen.id}"]`));
     updateReadingPosition();
   }catch(error){if(serial===renderSerial){$('pageStack').querySelector('.article-loading')?.remove();toast('正文读取失败，请运行更新脚本');}}
 }
+function setActiveHit() {
+  articleMarks.forEach((n,i)=>{
+    n.classList.toggle('current',i===hitIndex);
+    if (n.classList.contains('source-highlight')) {
+      for (const rect of n.parentElement.querySelectorAll(`i[data-hit="${n.dataset.hit}"]`)) {
+        rect.classList.toggle('current', i === hitIndex);
+      }
+    }
+  });
+}
+
 function focusHit(){
-  articleMarks.forEach((n,i)=>n.classList.toggle('current',i===hitIndex));
+  setActiveHit();
   const mark=articleMarks[hitIndex];if(!mark)return;
   const details = mark.closest('details');
   if (details) details.open = true;
@@ -342,6 +466,7 @@ function stepHit(direction){if(!hits.length)return;hitIndex=(hitIndex+direction+
 function goToPage(value){
   if(!readerDocument)return;const n=Number(value)-1;if(!Number.isInteger(n)||n<0||n>=readerDocument.pages)return;
   if (issueView) { navigateIssue(readerDocument.id, {p:n}); return; }
+  if (selected?.sourcePage) { navigateIssue(readerDocument.id, {p:n}, true, true); return; }
   const anchor=$('pageStack').querySelector(`[data-page="${n}"]`);
   if(anchor){navigateEntry(selected.id, n);}
   else {

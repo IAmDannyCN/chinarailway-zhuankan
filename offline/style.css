@@ -241,3 +241,23 @@ dialog::backdrop { background: #18302566; }
 .article-figure figcaption { text-align: center; }
 .figure-text { margin-top: 6px; }
 .figure-text > div { padding: .65em .8em; background: var(--subtle); overflow-wrap: anywhere; }
+
+.reading-article .reading-line {
+  margin: 0; text-align: left; text-indent: 0; padding-inline-start: var(--line-indent, 0);
+}
+.reading-article .reading-annotation {
+  margin: .6em 0; text-indent: 0; text-align: right;
+}
+.reading-centered { text-align: center; }
+.reading-bold { font-weight: 700; }
+.article-table td:not(.table-prose):not(.table-station) { text-wrap: balance; }
+.source-sheet { position: relative; overflow: hidden; background: white; }
+.source-sheet img { position: absolute; left: 0; width: 100%; max-width: none; }
+.source-highlights { position: absolute; inset: 0; pointer-events: none; }
+.source-anchor { position: absolute; inset-inline-start: 0; pointer-events: none; }
+.reading-article .source-highlight {
+  position: absolute; display: block; background: #ffdf39; opacity: .45; mix-blend-mode: multiply;
+}
+.reading-article .source-highlight.current { background: #ffa526; opacity: .68; }
+.source-transcript { white-space: pre-wrap; }
+.chapter-link time { display: block; color: var(--muted); font-size: .84em; margin-top: 2px; }

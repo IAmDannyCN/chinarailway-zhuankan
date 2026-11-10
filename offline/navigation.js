@@ -1,6 +1,6 @@
 'use strict';
 
-const searchFields = ['query', 'yearFrom', 'yearTo', 'topic', 'kind', 'volume', 'sort'];
+const searchFields = ['query', 'yearFrom', 'yearTo', 'topic', 'kind', 'volume', 'sort', 'searchMode'];
 const routeMemory = new Map();
 let currentRoute;
 let routeSequence = Date.now();
@@ -28,9 +28,9 @@ function renderRoute(route, previous, restoring = false) {
     const document = catalog.docs.find(doc => doc.id === route.issue);
     if (!document) return;
     const nextTerms = route.terms || [];
-    if (issueView?.document !== document || terms.join('\0') !== nextTerms.join('\0')) {
+    if (issueView?.document !== document || !!issueView.original !== !!route.original || terms.join('\0') !== nextTerms.join('\0')) {
       terms = nextTerms;
-      openIssue(document);
+      openIssue(document, !!route.original);
     }
     if (route.chapterScroll != null) $('issueContents').scrollTop = route.chapterScroll;
     if (route.viewKey !== previous?.viewKey) {
@@ -67,9 +67,10 @@ function navigateEntry(id, targetPage) {
     resultScroll: $('results').scrollTop, visibleLimit});
 }
 
-function navigateIssue(id, target = {p: 0, start: true}, fromSearch = false) {
+function navigateIssue(id, target = {p: 0, start: true}, fromSearch = false,
+    original = issueView?.document.id === id && issueView.original) {
   const keepTerms = issueView?.document.id === id || fromSearch;
-  pushRoute({mode: 'issue', issue: id, target, terms: keepTerms ? [...terms] : [], form: searchFormValues(),
+  pushRoute({mode: 'issue', issue: id, target, original: !!original, terms: keepTerms ? [...terms] : [], form: searchFormValues(),
     chapterScroll: issueView?.document.id === id ? $('issueContents').scrollTop : 0});
 }
 

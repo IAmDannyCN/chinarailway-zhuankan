@@ -7,7 +7,7 @@ function originalURL(document, number) {
   return number == null ? path : path + '#page=' + (number + 1);
 }
 
-function issueSections(document) {
+function issueSections(document, sourcePages = new Set()) {
   const pages = Array.from({length: document.pages}, () => []);
   for (const entry of document.entries) {
     for (const part of entry.parts) pages[part.p].push({entry, part});
@@ -15,6 +15,10 @@ function issueSections(document) {
   const sections = [];
   const seen = new Set();
   pages.forEach((items, p) => {
+    if (sourcePages.has(p) && items.length > 1) {
+      items = [{entry: {id: `source-${p}`, p, a: 0, title: `PDF 第 ${p + 1} 页`, heading: false},
+        part: {p, a: 0, b: document.texts[p].length}}];
+    }
     if (!items.length) {
       items.push({entry: {id: `page-${p}`, p, a: 0, title: `PDF 第 ${p + 1} 页`, heading: false},
         part: {p, a: 0, b: document.texts[p].length}});
@@ -36,19 +40,21 @@ function issueSections(document) {
 function issueChapters(document, sections) {
   const bookmarks = (document.toc || []).filter(([, title]) => title.trim());
   if (bookmarks.some(([, , p]) => p > 0 && p <= document.pages)) {
-    const bookmarkTitle = value => normalize(value).replace(/^(?:[一二三四五六七八九十百]+、|[0-9]+[.、])/, '');
+    const bookmarkTitle = value => normalize(value).replace(/^(?:[一二三四五六七八九十百]+、|[0-9]+[.、])/, '')
+      .replace(/\([^)]*\d[^)]*\)$/, '');
     return bookmarks.map(([level, title, number]) => {
       const p = number - 1;
       if (p < 0 || p >= document.pages) return {level, title};
       const key = bookmarkTitle(title);
-      const entry = sections.find(section => section.parts.some(part => part.p === p) &&
-        bookmarkTitle(section.title) === key);
+      const matches = sections.filter(section => bookmarkTitle(section.title) === key);
+      const entry = matches.find(section => section.parts.some(part => part.p === p)) ||
+        matches.find(section => Math.abs(section.p - p) === 1);
       const offset = document.texts[p].indexOf(title.toLowerCase().replace(/\s+/g, ''));
-      return {level, title, p, a: entry?.parts.find(part => part.p === p)?.a ?? Math.max(0, offset)};
+      return {level, title, p, date: entry?.date, a: entry?.parts.find(part => part.p === p)?.a ?? Math.max(0, offset)};
     });
   }
   const chapters = sections.filter(section => section.heading)
-    .map(section => ({level: section.parentId ? 2 : 1, title: section.title, p: section.p, a: section.a}));
+    .map(section => ({level: section.parentId ? 2 : 1, title: section.title, date: section.date, p: section.p, a: section.a}));
   return chapters.length ? chapters : document.texts.map((_, p) =>
     ({level: 1, title: `PDF 第 ${p + 1} 页`, p, a: 0}));
 }
@@ -61,7 +67,7 @@ function closeIssue() {
   $('openIssueHere').hidden = false;
 }
 
-function openIssue(document) {
+function openIssue(document, original = false) {
   closeIssue();
   const serial = ++renderSerial;
   readerDocument = document;
@@ -86,15 +92,19 @@ function openIssue(document) {
   const chapters = issueChapters(document, sections);
   const contents = $('issueContents');
   contents.style.setProperty('--chapter-page-digits', Math.max(3, String(document.pages).length));
-  contents.innerHTML = chapters.map(({level, title, p}, index) => {
-    const label = `<span>${escapeHtml(title)}</span>`;
+  contents.innerHTML = chapters.map(({level, title, p, date}, index) => {
+    const label = `<span>${escapeHtml(title)}${date ? '<time>' + escapeHtml(date) + '</time>' : ''}</span>`;
     const style = `style="--chapter-indent:${Math.min(6, Math.max(0, level - 1))}"`;
     return p == null ? `<div class="chapter-label" ${style}>${label}</div>` :
       `<button class="chapter-link" ${style} data-chapter="${index}">${label}<small>${p + 1}</small></button>`;
   }).join('');
   contents.scrollTop = 0;
 
-  const slots = sections.map(entry => {
+  const displaySections = original ? document.texts.map((text, p) => ({
+    id: `original-${p}`, p, a: 0, title: `PDF 第 ${p + 1} 页`, heading: false, document,
+    parts: [{p, a: 0, b: text.length}]
+  })) : document.originalPages ? issueSections(document, new Set(document.mediaPages)) : sections;
+  const slots = displaySections.map(entry => {
     const node = window.document.createElement('div');
     node.className = 'issue-slot';
     node.style.minHeight = Math.max(36, entry.parts.reduce((height, part) =>
@@ -115,7 +125,7 @@ function openIssue(document) {
   const orderedChapters = chapters.map((chapter, index) => ({...chapter, index}))
     .filter(chapter => chapter.p != null)
     .sort((a, b) => a.p - b.p || a.a - b.a || a.level - b.level);
-  const view = {document, serial, chapters, orderedChapters, slots, byPage, observer, anchor: {p: 0}, jump: 0};
+  const view = {document, original, serial, chapters, orderedChapters, slots, byPage, observer, anchor: {p: 0}, jump: 0};
   issueView = view;
   for (const {node} of slots) observer.observe(node);
   updateReadingPosition();
@@ -126,7 +136,7 @@ function loadIssueSlot(view, slot) {
   if (!slot.loading) {
     view.observer.unobserve(slot.node);
     slot.node.innerHTML = '<p class="article-loading">正在读取…</p>';
-    slot.loading = renderReadingSection(slot.entry, view.serial, true).then(section => {
+    slot.loading = renderReadingSection(slot.entry, view.serial, true, view.original).then(section => {
       if (!section || issueView !== view) return;
       const keepPosition = !view.pending && view.positionScroll === $('viewer').scrollTop;
       slot.node.replaceChildren(section);

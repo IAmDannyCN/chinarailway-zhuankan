@@ -106,12 +106,14 @@ function search(route = {}) {
   terms = [...new Set($('query').value.trim().split(/\s+/).map(normalize).filter(Boolean))];
   visibleLimit = route.visibleLimit || 80;
   results = [];
-  for (const entry of entries) {
+  const sourceMode = $('searchMode').value === 'pdf';
+  const candidates = sourceMode ? pdfSearchPages() : entries;
+  for (const entry of candidates) {
     if ($('yearFrom').value && entry.document.year < Number($('yearFrom').value)) continue;
     if ($('yearTo').value && entry.document.year > Number($('yearTo').value)) continue;
     if ($('volume').value && entry.document.id !== $('volume').value) continue;
-    if ($('topic').value && !(entry.topics || [entry.topic]).includes($('topic').value)) continue;
-    if ($('kind').value ? entry.kind !== $('kind').value : entry.kind === '目录') continue;
+    if (!sourceMode && $('topic').value && !(entry.topics || [entry.topic]).includes($('topic').value)) continue;
+    if (!sourceMode && ($('kind').value ? entry.kind !== $('kind').value : entry.kind === '目录')) continue;
     if (!terms.every(term => entry.searchTitle.includes(term) || entry.searchParts.some(part => part.text.includes(term)))) continue;
     const matchedParts = entry.searchParts.filter(part => terms.some(term => part.text.includes(term)));
     let count = 0;
@@ -131,9 +133,27 @@ function search(route = {}) {
   updateFilterCount();
   renderResults();
   $('results').scrollTop = route.resultScroll || 0;
-  const entry = route.entry && entries.find(item => item.id === route.entry);
+  const entry = route.entry && (sourceMode ? results.find(item => item.entry.id === route.entry)?.entry
+    : entries.find(item => item.id === route.entry));
   if (entry || results.length) selectEntry(entry?.id || results[0].entry.id, route.page, route.readerScroll, route.hitIndex);
   else clearPreview();
+}
+
+function* pdfSearchPages() {
+  if (!terms.length) return;
+  for (const document of catalog.docs) {
+    if (!document.originalPages || $('volume').value && document.id !== $('volume').value ||
+        $('yearFrom').value && document.year < Number($('yearFrom').value) ||
+        $('yearTo').value && document.year > Number($('yearTo').value)) continue;
+    for (const [p, original] of document.texts.entries()) {
+      const text = normalize(original);
+      if (!terms.every(term => text.includes(term))) continue;
+      const part = {p, a: 0, b: original.length};
+      yield {id: `${document.id}-pdf-${p}`, p, a: 0, parts: [part], searchParts: [{...part, text}],
+        title: `PDF 第 ${p + 1} 页`, kind: '原版面', searchTitle: '', confidence: 'PDF 原页检索',
+        document, sourcePage: true, heading: false};
+    }
+  }
 }
 
 function renderResults() {
@@ -187,7 +207,7 @@ function renderResults() {
     </button>
     <div class="result-source">
       <button class="source-jump" data-issue="${entry.document.id}" data-page="${pageNumber}" data-offset="${offset}"
-        data-match="${match}" title="在整期中查看">${escapeHtml(entry.document.file)}<small>${escapeHtml(location)}</small></button>
+        data-match="${match}" data-original="${!!entry.sourcePage}" title="在整期中查看">${escapeHtml(entry.document.file)}<small>${escapeHtml(location)}</small></button>
       <span>${matches}</span>
     </div></div>`;
   });
@@ -238,19 +258,19 @@ async function copySource() {
 }
 
 $('searchForm').onsubmit = event => { event.preventDefault(); navigateSearch(); };
-for (const id of ['yearFrom', 'yearTo', 'topic', 'kind', 'volume', 'sort']) $(id).onchange = navigateSearch;
+for (const id of ['yearFrom', 'yearTo', 'topic', 'kind', 'volume', 'sort', 'searchMode']) $(id).onchange = navigateSearch;
 $('results').onclick = event => {
   const source = event.target.closest('[data-issue]');
   if (source) {
     navigateIssue(source.dataset.issue, {p: Number(source.dataset.page), a: Number(source.dataset.offset),
-      match: source.dataset.match === 'true'}, true);
+      match: source.dataset.match === 'true'}, true, source.dataset.original === 'true');
     return;
   }
   const button = event.target.closest('[data-id]');
   if (button) navigateEntry(button.dataset.id);
 };
 $('reset').onclick = () => {
-  for (const id of ['yearFrom', 'yearTo', 'topic', 'kind', 'volume']) $(id).value = '';
+  for (const id of ['yearFrom', 'yearTo', 'topic', 'kind', 'volume', 'searchMode']) $(id).value = '';
   navigateSearch();
 };
 $('query').addEventListener('search', () => { if (!$('query').value) navigateSearch(); });
@@ -299,11 +319,14 @@ $('openIssueHere').onclick = () => {
   const hit = hits[hitIndex];
   const visible = [...$('pageStack').querySelectorAll(`span[data-page="${page}"]`)]
     .find(node => node.getBoundingClientRect().bottom > $('viewer').getBoundingClientRect().top + 24);
-  navigateIssue(readerDocument.id, {p: page, a: visible ? Number(visible.dataset.offset) : hit?.p === page ? hit.a : 0}, true);
+  navigateIssue(readerDocument.id, {p: page, a: visible ? Number(visible.dataset.offset) : hit?.p === page ? hit.a : 0,
+    match: !!selected?.sourcePage && hit?.p === page}, true, !!selected?.sourcePage);
 };
 $('printedPage').onclick = $('openIssueHere').onclick;
 function updateFilterCount() {
-  const count = ['yearFrom', 'yearTo', 'topic', 'kind', 'volume'].filter(id => $(id).value).length;
+  const original = $('searchMode').value === 'pdf';
+  for (const id of ['topic', 'kind']) $(id).disabled = original;
+  const count = ['yearFrom', 'yearTo', 'topic', 'kind', 'volume', 'searchMode'].filter(id => !$(id).disabled && $(id).value).length;
   $('filterCount').textContent = count;
   $('filterCount').hidden = !count;
 }

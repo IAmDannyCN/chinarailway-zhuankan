@@ -17,7 +17,7 @@ echo 首次使用：准备本地更新工具。
 %python_launcher% -m venv .venv
 if errorlevel 1 goto failed
 :ready
-".venv\Scripts\python.exe" -c "import importlib.metadata as m; assert m.version('PyMuPDF') == '1.26.7'" >nul 2>nul
+".venv\Scripts\python.exe" -c "import importlib.metadata as m; assert m.version('PyMuPDF') == '1.26.7'; assert m.version('Pillow') == '13.0.0'" >nul 2>nul
 if not errorlevel 1 goto update
 echo 首次安装 PDF 处理工具需要联网；以后更新可离线运行。
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt

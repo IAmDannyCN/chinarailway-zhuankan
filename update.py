@@ -29,7 +29,7 @@ OUT = ROOT / 'offline'
 def make_catalog(documents, previous=None):
     documents = sorted(documents, key=lambda d: (d['year'], d['issueOrder'], d['file']))
     payload = dict(version=SEGMENT_VERSION, extractVersion=EXTRACT_VERSION, sample=False,
-                   runtime={name: package_version(name) for name in ['pymupdf']}, docs=documents)
+                   runtime={name: package_version(name) for name in ['pymupdf', 'pillow']}, docs=documents)
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf8')
     fingerprint = hashlib.sha256(encoded).hexdigest()
     prior = previous or {}
@@ -157,6 +157,9 @@ def validate_document(document, output, previews=True, coordinates=True, layout=
         if previews:
             image = folder / f'{number + 1}.page.js'
             assert image.is_file() and image.stat().st_size > 100, f'PDF第{number + 1}页缺少预览'
+            if document.get('originalPages'):
+                original = folder / f'{number + 1}.original.webp'
+                assert original.is_file() and original.stat().st_size >= 20, f'PDF第{number + 1}页缺少原版面'
     # Independently check explicit original-page captions, beyond character coverage.
     if layout is None:
         with gzip.open(folder / 'layout.json.gz', 'rt', encoding='utf8') as stream:
@@ -182,9 +185,10 @@ def process_document(path, output, digest):
     if layout['digest'] != digest:
         raise ValueError('PDF 在更新期间发生变化，请再次运行更新。')
     document = prepare(path, output, layout)
-    _, page_count, _ = render_document(path, output, document['entries'], layout)
+    _, page_count, _ = render_document(path, output, layout)
     manifest = Path(output) / 'data' / document['id'] / 'html.json'
     document['mediaPages'] = json.loads(manifest.read_text())['mediaPages']
+    document['originalPages'] = True
     validate_document(document, output, layout=layout)
     return document, page_count
 
@@ -197,7 +201,8 @@ def has_reading_files(document, output):
     except FileNotFoundError:
         return False
     return {'html.json', 'layout.json.gz'} <= names and all(
-        f'{number+1}.page.js' in names for number in range(document['pages'])
+        f'{number+1}.page.js' in names and f'{number+1}.original.webp' in names
+        for number in range(document['pages'])
     )
 
 
@@ -297,7 +302,7 @@ def main():
                    for path in paths}
         pipeline = hashlib.sha256(
             b''.join((ROOT / name).read_bytes() for name in ['indexer.py', 'update.py', 'requirements.txt'])
-            + package_version('pymupdf').encode()
+            + (package_version('pymupdf') + package_version('pillow')).encode()
         ).hexdigest()
         signature = hashlib.sha256((pipeline + json.dumps(
             [(name, digest) for name, (_, digest) in sources.items()]
@@ -352,10 +357,13 @@ def main():
         # Only remove obsolete generated rasters after the replacement catalogue is validated.
         for document in processed:
             folder=OUT/'data'/document['id']
-            for pattern in ['*.webp','*.coords.js']:
+            for pattern in ['*.coords.js']:
                 for obsolete in folder.glob(pattern): obsolete.unlink()
             for name in ['previews.json','cache.json','coords.js']:
                 (folder/name).unlink(missing_ok=True)
+            for obsolete in folder.glob('*.webp'):
+                if not obsolete.name.endswith('.original.webp'):
+                    obsolete.unlink()
         active = {document['id'] for document in documents}
         for folder in (OUT/'data').iterdir():
             if (not folder.is_dir() or folder.is_symlink() or folder.name in active
@@ -363,7 +371,7 @@ def main():
                     or not (folder/'source.json').is_file()):
                 continue
             generated = {'source.json','layout.json.gz','segments.json.gz','html.json','previews.json','cache.json','coords.js'}
-            if all(p.is_file() and not p.is_symlink() and (p.name in generated or re.fullmatch(r'\d+\.(?:webp|coords\.js|page\.js)',p.name)) for p in folder.iterdir()):
+            if all(p.is_file() and not p.is_symlink() and (p.name in generated or re.fullmatch(r'\d+\.(?:webp|coords\.js|page\.js|original\.webp)',p.name)) for p in folder.iterdir()):
                 shutil.rmtree(folder)
         remove_legacy_review_list(OUT, previous)
         atomic_text(receipt, json.dumps(dict(signature=signature, pipeline=pipeline, contentHash=data['contentHash'])))
