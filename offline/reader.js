@@ -243,44 +243,31 @@ function tableHTML(block, grouped = false) {
   const cols = block.xs.slice(1).map((x, i) =>
     `<col style="width:${(x - block.xs[i]) / (block.right - block.left) * 100}%">`).join('');
   const cells = block.rows.flat();
-  const labels = new Map(cells.map(cell => [cell, tableCellText(cell)]));
-  const columns = Array.from({length: block.columns}, () => ({stationHeading: -1, prose: false, marker: false}));
-  const stationLabel = /^(?:(?:始发|出发|到达|经由|办理|交接|货运|客运)站(?:名|名称)?|站名(?:称)?|车站(?:名|名称)?|发站|到站|起点站|终点站)$/;
-  const proseLabel = /接续线名|备注|说明|办理限制|修改内容|办理范围|限制内容/;
+  const {family, headerRows, columns, labels} = tableProfile(block, block.caption);
   const stationMarker = /^[□☐⊗×※△▲○◯◎⊙●◇◆☆★]/u;
-  let headingEnd = -1;
   for (const cell of cells) {
-    if (cell.r0 > 3 || cell.c0 !== cell.c1) continue;
+    if (cell.c0 !== cell.c1 || cell.r0 < headerRows) continue;
     const column = columns[cell.c0];
     const label = labels.get(cell);
-    if (column.stationHeading < 0 && stationLabel.test(label)) {
-      column.stationHeading = cell.r1;
-      headingEnd = Math.max(headingEnd, cell.r1);
-    }
-    if (cell.r0 === 0 && proseLabel.test(label)) {
-      column.prose = true;
-      headingEnd = Math.max(headingEnd, cell.r1);
-    }
-  }
-  for (const cell of cells) {
-    if (cell.c0 !== cell.c1 || cell.r0 <= headingEnd) continue;
-    const column = columns[cell.c0];
-    const label = labels.get(cell);
-    if (column.stationHeading >= 0) {
+    if (column.station) {
       column.marker ||= stationMarker.test(label);
-    } else if (label.length >= 12 && /[\u4e00-\u9fff]/.test(label)) {
-      column.prose = true;
+    } else if (!column.kind && label.length >= 12 && /[\u4e00-\u9fff]/.test(label)) {
+      column.kind = 'prose';
     }
   }
 
   const textUnits = text => [...text].reduce((n, ch) => n + (/[\u2e80-\uffef]/u.test(ch) ? 1 : .62), 0);
-  let minWidth = width * 1.12;
+  let minWidth = width * (family === 'train' ? .97 : 1.12);
   function renderCell(cell) {
     const column = columns[cell.c0];
     const label = labels.get(cell);
-    const body = cell.r0 > headingEnd;
-    const station = cell.c0 === cell.c1 && column.stationHeading >= 0 && cell.r0 > column.stationHeading;
-    const prose = !station && body && (cell.c0 === cell.c1 ? column.prose : label.length >= 12);
+    const header = cell.r0 < headerRows && cell.r1 < headerRows;
+    const body = cell.r0 >= headerRows;
+    const station = body && cell.c0 === cell.c1 && column.station;
+    const prose = !station && body && (cell.c0 === cell.c1 ? column.kind === 'prose' : label.length >= 12);
+    const quantity = body && column.kind === 'number' && /^[+−—–\-\d.,%￥¥~≤≥<>]+$/.test(label);
+    const fixed = body && ['code', 'time'].includes(column.kind) && /^[\w.:+/−—–-]+$/.test(label);
+    let nowrap = false;
     const runs = tableCellRuns(cell);
     const stackedNumbers = cell.lines.length > 1 && cell.lines.every(line =>
       /^[+−—-]?[０-９0-9]+(?:[.．][０-９0-9]+)?$/.test(line.runs.map(run => run.text).join('')));
@@ -305,13 +292,20 @@ function tableHTML(block, grouped = false) {
         ? Math.max(...cell.lines.map(line => textUnits(line.runs.map(run => run.text).join(''))))
         : textUnits(label);
       // Long entries and sliver columns can wrap rather than widening the entire table.
-      minWidth = Math.max(minWidth, Math.min(64, (units + .9 + (station && column.marker ? 1.25 : 0)) / fraction));
+      const required = (units + .9 + (station && column.marker ? 1.25 : 0)) / fraction;
+      nowrap = (quantity || fixed) && required <= 64;
+      const limit = family === 'train' && !quantity && !fixed ? 46 : 64;
+      minWidth = Math.max(minWidth, Math.min(limit, required));
     }
-    const style = station ? 'table-station' : prose ? 'table-prose' : '';
-    return `<td class="${style}" rowspan="${cell.r1 - cell.r0 + 1}" colspan="${cell.c1 - cell.c0 + 1}">${content}</td>`;
+    const style = station ? 'table-station' : prose ? 'table-prose' : quantity ? 'table-quantity' : fixed ? 'table-fixed' : '';
+    const tag = header ? 'th' : 'td';
+    const scope = header ? ` scope="${cell.c0 === cell.c1 ? 'col' : 'colgroup'}"` : '';
+    return `<${tag} class="${style}${nowrap ? ' table-nowrap' : ''}"${scope} rowspan="${cell.r1 - cell.r0 + 1}" colspan="${cell.c1 - cell.c0 + 1}">${content}</${tag}>`;
   }
-  const rows = block.rows.map(row => '<tr>' + row.map(renderCell).join('') + '</tr>').join('');
-  return wrap(`<table style="min-width:${minWidth}em"><colgroup>${cols}</colgroup><tbody>${rows}</tbody></table>`);
+  const rows = block.rows.map(row => '<tr>' + row.map(renderCell).join('') + '</tr>');
+  const separateHead = headerRows > 0 && !cells.some(cell => cell.r0 < headerRows && cell.r1 >= headerRows);
+  const head = separateHead ? '<thead>' + rows.splice(0, headerRows).join('') + '</thead>' : '';
+  return wrap(`<table data-family="${family}" style="min-width:${minWidth}em"><colgroup>${cols}</colgroup>${head}<tbody>${rows.join('')}</tbody></table>`);
 }
 function blocksHTML(blocks) {
   return blocks.map(block => {
@@ -366,6 +360,7 @@ async function renderReadingSection(entry, serial, wholeIssue = false, original 
     const decoded = decodeFlow(entry.document, part.p, markup);
     if (markup.includes('image-note')) imagePages.add(part.p + 1);
     const fresh = readingPartBlocks(decoded, part, entry, original);
+    for (const block of fresh) if (block.type === 'table') block.caption = entry.title;
     if (fresh[0]?.type === 'source' && fresh[0].a === 0 && fresh[0].b === entry.document.texts[part.p].length) {
       if (shownSources.has(part.p)) continue;
       shownSources.add(part.p);

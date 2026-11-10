@@ -295,7 +295,9 @@ function tableRegions(runs, paths, pageWidth, strict = false) {
         line.runs.map(run => run.text).join('')
       )).length >= (strict ? 2 : 3)
     ).length >= 2);
-    if (hasUnruledRows) {
+    const hasStackedTimes = strict && rows.some(row => row.some(cell =>
+      cell.lines.filter(line => /^\d{1,2}[:：.]\d{2}$/.test(line.runs.map(run => run.text).join(''))).length >= 2));
+    if (hasUnruledRows || hasStackedTimes) {
       fallback();
       continue;
     }
@@ -310,6 +312,68 @@ function tableCellRuns(cell) {
 
 function tableCellText(cell) {
   return tableCellRuns(cell).map(run => run.text).join('').normalize('NFKC').replace(/\s+/g, '');
+}
+
+const stationTableLabel = /^(?:(?:始发|出发|到达|经由|办理|交接|货运|客运)站(?:名|名称)?|站名(?:称)?|车站(?:名|名称)?|发站|到站|起点站|终点站)$/;
+const descriptiveTableLabel = /接续线名|备注|附注|附记|说明|办理限制|修改内容|办理范围|限制内容|修改前|修改后|原内容|订正后|^原文$|^订正$|^[误正]$/;
+const timeTableLabel = /^(?:到达|出发|开车|通过|发车|终到|停车|停留|运行|开行|办理)(?:时刻|时间)?$|时刻$|^(?:时分|时间|到|开|发)$/;
+const codeTableLabel = /^(?:[\u4e00-\u9fff]{0,14}(?:编号|代码|编码|代号|电报码|电报略码)|车次|车号|品名号|品类号|序号)$/;
+const numericTableLabel = /票价|运价|费率|收费标准|计费标准|金额|费额|小计|合计|单价|运费|数量|人次|人数|对数|吨数|件数|辆数|箱数|票数|收入|支出|补款|重量|定员|载重|速度|里程/;
+const knownTableLabel = /^(?:[\u4e00-\u9fff]{0,14}(?:名称|站名|品名|品类|规格|车型|车种|日期|单位|项目|位置|栏别|页码|页数|区间|线路|线名|区划|局别|局名|简称)|新设|取消|变更|类别|车厢|数量|合计|小计)$/;
+
+function tableProfile(table, title = '') {
+  const cells = table.rows.flat();
+  const labels = new Map(cells.map(cell => [cell, tableCellText(cell)]));
+  const recognized = text => !!text && text.length <= 22 && (
+    stationTableLabel.test(text) || descriptiveTableLabel.test(text) || timeTableLabel.test(text) ||
+    codeTableLabel.test(text) || numericTableLabel.test(text) || knownTableLabel.test(text));
+  const rowKey = row => row.map(cell => labels.get(cell)).filter(Boolean);
+  let headerRows = 0;
+  for (let i = 0; i < Math.min(4, table.rows.length - 1); i++) {
+    const row = table.rows[i];
+    const keys = rowKey(row);
+    const activeSpan = cells.some(cell => cell.r0 < i && cell.r1 >= i && cell.r1 <= 2 && recognized(labels.get(cell)));
+    const sequence = i === 0 && keys.length >= 3 && keys.every((key, n) => key === String(n + 1));
+    if (!(keys.filter(recognized).length >= 2 || sequence || activeSpan && keys.length > 0 ||
+        i === 0 && keys.length === 1 && row.some(cell => cell.c1 > cell.c0 && recognized(labels.get(cell))))) break;
+    headerRows++;
+  }
+  const headers = cells.filter(cell => cell.r0 < headerRows && cell.r1 < headerRows);
+  const keys = headers.map(cell => labels.get(cell));
+  const header = keys.join('｜');
+  const subject = title.normalize('NFKC');
+  let family = 'grid';
+  if (/修改前|修改后|原内容|订正后|原刊内容|修改事项/.test(header) ||
+      /(?:订正表|勘误表|更正表|修改事项|修改表)/.test(subject) && /页码|位置|栏别|页数|修改/.test(header)) family = 'amendment';
+  else if (keys.some(key => /^(?:本线|营业|运价)?里程(?:\(公里\))?$/.test(key)) &&
+      /站名|车站|本线里程|接续线/.test(header)) family = 'mileage';
+  else if (/统计|汇总|清算|结算|利润|奖励/.test(subject) &&
+      /金额|合计|收入|支出|人数|辆数|箱数|件数|总重|吨数|利润/.test(header)) family = 'statistics';
+  else if (/票价|费率|收费标准|计费标准|运价率|运费\(元|单价/.test(header) ||
+      /(?:费率|票价|运价|运费计算)表/.test(subject) && /区间|运价|计费|票种|席别|金额/.test(header)) family = 'fare';
+  else if (/车种|车型|轴数|型号|技术标准/.test(header + subject) &&
+      keys.filter(key => /轴距|轴重|速度|自重|载重|定员|最大尺寸|制动|供水/.test(key)).length >= 2) family = 'technical';
+  else if (/编组顺序|运行时刻表|列车时刻/.test(subject) && /车次|车种|车型|时刻|开车|顺序|时分/.test(header) ||
+      /车次/.test(header) && keys.some(key => /^(?:到达|开车|发车|停留|站序|时分)(?:时刻|时间)?$/.test(key))) family = 'train';
+  else if (/办理范围|办理限制|专用线名称|专用铁路名称|办理箱型|营业范围/.test(header)) family = 'operation';
+  else if (keys.some(key => codeTableLabel.test(key) && !/^(?:序号|车次|车号)$/.test(key)) &&
+      /品名|品类|站名|路局|名称|代码|电报|编码/.test(header) ||
+      /(?:品名|品类)(?:分类|代码)?表/.test(subject) && /品名|品类/.test(header)) family = 'code';
+  else if (/金额|收入|支出|补款|合计/.test(header) && /单位|项目|人数|数量|日期|小计|金额/.test(header)) family = 'statistics';
+
+  const columns = Array.from({length: table.columns}, () => ({kind: '', station: false}));
+  for (const cell of headers) {
+    const label = labels.get(cell);
+    for (let i = cell.c0; i <= cell.c1; i++) {
+      const column = columns[i];
+      if (cell.c0 === cell.c1 && stationTableLabel.test(label)) column.station = true;
+      if (descriptiveTableLabel.test(label)) column.kind = 'prose';
+      else if (codeTableLabel.test(label)) column.kind = 'code';
+      else if (timeTableLabel.test(label)) column.kind = 'time';
+      else if (numericTableLabel.test(label) && !column.kind) column.kind = 'number';
+    }
+  }
+  return {family, headerRows, columns, labels};
 }
 
 function joinTableContinuation(previous, nextBlocks, strict = false) {

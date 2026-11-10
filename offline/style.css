@@ -251,6 +251,12 @@ dialog::backdrop { background: #18302566; }
 .reading-centered { text-align: center; }
 .reading-bold { font-weight: 700; }
 .article-table td:not(.table-prose):not(.table-station) { text-wrap: balance; }
+.article-table th { border: 1px solid #dce3dc; padding: .4em .3em; font-weight: inherit; text-align: center; text-wrap: balance; }
+.article-table .table-quantity, .article-table .table-fixed { font-variant-numeric: tabular-nums; }
+.article-table .table-nowrap { white-space: nowrap; }
+.article-table [data-family="fare"] .table-quantity, .article-table [data-family="statistics"] .table-quantity {
+  text-align: right; padding-inline-end: .65em;
+}
 .source-sheet { position: relative; overflow: hidden; background: white; }
 .source-sheet img { position: absolute; left: 0; width: 100%; max-width: none; }
 .source-highlights { position: absolute; inset: 0; pointer-events: none; }
