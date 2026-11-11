@@ -7,7 +7,11 @@ function sliceReadingRuns(runs, start, end) {
 }
 
 function startsReadingParagraph(text) {
-  return /^(第[一二三四五六七八九十百\d]+条|[一二三四五六七八九十]+[、.]|\d{1,3}[.、](?!\d)|[（(][一二三四五六七八九十\d]+[)）]|附件|附表|注[:：])/.test(text);
+  return /^(第[一二三四五六七八九十百\d]+条|[一二三四五六七八九十]+[、.]|\d{1,3}[.、\ue010](?!\d)|[（(][一二三四五六七八九十\d]+[)）]|附件|附表|注[:：])/.test(text);
+}
+
+function readingFurniture(run, height) {
+  return (run.y < height * .11 || run.y > height * .94) && /^[\d.·□、()（）—\-\s]+$/.test(run.text);
 }
 
 // Prose reflows; table geometry preserves row/column correspondence and merged cells.
@@ -19,8 +23,8 @@ function articleBlocks(runs, rules, width, height, part, title) {
   for(const run of selectedRuns) {
     if(tableRuns.has(run))continue;
     // Repeated page furniture is excluded from the article, but stays in the original PDF.
-    if((run.y<height*.11 || run.y>height*.94) && /^[\d.·□、()（）—\-\s]+$/.test(run.text)) continue;
-    if(/^[\ue000-\uf8ff~]+$/.test(run.text)) continue;
+    if (readingFurniture(run, height)) continue;
+    if(!part.strict && /^[\ue000-\uf8ff~]+$/.test(run.text)) continue;
     let row=rows.at(-1);
     if(!row || (part.strict && run.line != null ? row.line !== run.line :
         Math.abs(row.y-run.y)>Math.max(run.size,row.size)*.85)) {
@@ -46,8 +50,19 @@ function articleBlocks(runs, rules, width, height, part, title) {
     }
     if (suppressed.size) break;
   }
-  const longRows = rows.filter(row => row.runs.map(run => run.text).join('').length >= 16);
-  const margin = Math.min(...(longRows.length ? longRows : rows).map(row => row.runs[0].x));
+  for (const row of rows) {
+    row.x = row.runs[0].x;
+    const last = row.runs.at(-1);
+    row.right = last.x + (last.width || last.size * last.text.length);
+  }
+  const sizes = rows.filter(row => !suppressed.has(row)).flatMap(row =>
+    row.runs.filter(run => !run.bold).flatMap(run => Array(run.text.length).fill(run.size))).sort((a,b) => a-b);
+  const bodySize = sizes[Math.floor(sizes.length / 2)] || 10;
+  const bodyRows = rows.filter(row => !suppressed.has(row) && Math.abs(row.size - bodySize) < bodySize * .15 &&
+    row.runs.some(run => !run.bold) && row.runs.map(run => run.text).join('').length >= 16);
+  const margins = bodyRows.length ? bodyRows : rows;
+  const margin = Math.min(...margins.map(row => row.x));
+  const rightMargin = Math.max(...margins.map(row => row.right));
   for(const row of rows) {
     const content=row.runs.map(r=>r.text).join('');
     while(tables.length && tables[0].top<row.y)blocks.push(tables.shift());
@@ -56,6 +71,10 @@ function articleBlocks(runs, rules, width, height, part, title) {
       if (row === titleRows[0]) {
         blocks.push({type: 'document-title', centered: true, runs: titleRows.flatMap(row => row.runs)});
       }
+      continue;
+    }
+    if (/^[（(]?(?:续上表|续表|接上表)[）)]?[:：]?$/.test(content)) {
+      blocks.push({type: 'continuation', runs: row.runs});
       continue;
     }
     const leader = /(?:\.{4,}|[⋯…·]{3,})/.exec(content);
@@ -85,7 +104,7 @@ function articleBlocks(runs, rules, width, height, part, title) {
     if (!part.strict && title && content.endsWith(title) && row.runs[0].a < part.a + 180 &&
         /^(?:附件|附表|附图|附录).{0,8}[:：]$/.test(content.slice(0, -title.length))) continue;
     if(/^(附件|附表|附录)[一二三四五六七八九十\d]*[:：]?$/.test(content)) continue;
-    if(/^[\u4e00-\u9fff]{0,15}[〔(\[]\d{2,4}[〕)\]][\u4e00-\u9fff]{0,8}\d+号$/.test(content) || /^[一二三四五六七八九十〇○零\d]{4}年.{1,18}日$/.test(content)){blocks.push({type:'metadata',runs:row.runs});continue;}
+    if(/^[\u4e00-\u9fff]{0,15}[〔(\[]\d{2,4}[〕)\]][\u4e00-\u9fff]{0,8}\d+号$/.test(content) || /^[一二三四五六七八九十〇○零\d]{4}年.{1,18}日$/.test(content)){blocks.push({type:'metadata',alignedRight:row.x>width*.44,runs:row.runs});continue;}
     const x = row.runs[0].x, lastRun = row.runs.at(-1);
     const right = lastRun.x + (lastRun.width || lastRun.size * lastRun.text.length);
     const centered = (heading || content.length <= 45 && tables[0]?.top - row.y < row.size * 5)
@@ -94,7 +113,25 @@ function articleBlocks(runs, rules, width, height, part, title) {
     if (heading || centered) { blocks.push({type: 'heading', runs: row.runs, centered}); continue; }
     if (part.strict) {
       const indent = alignedRight ? 0 : Math.max(0, Math.min(8, (x - margin) / row.size));
-      blocks.push({type: alignedRight ? 'annotation' : 'line', indent, runs: row.runs});
+      if (alignedRight) {
+        blocks.push({type: 'annotation', runs: row.runs});
+        continue;
+      }
+      const last = blocks.at(-1);
+      const previous = last?.lastRow;
+      const hanging = last?.note && indent <= last.indent + 2.5;
+      const starts = startsReadingParagraph(content) || indent >= 1.2 && !hanging;
+      const previousFull = previous && previous.right >= rightMargin - previous.size * 1.5;
+      const previousContinues = last?.runs && /[，、,（(]$/.test(last.runs.at(-1).text);
+      const close = previous && row.y - previous.y > row.size * .4 && row.y - previous.y < row.size * 2.3;
+      if (last?.type === 'paragraph' && !starts && close && (previousFull || previousContinues)) {
+        last.runs.push(...row.runs);
+        last.lastRow = row;
+        last.openEnd = row.right >= rightMargin - row.size * 1.5;
+      } else {
+        blocks.push({type: 'paragraph', indent, note: /^注[:：]/.test(content), continued: !starts, lastRow: row,
+          openEnd: row.right >= rightMargin - row.size * 1.5, runs: row.runs});
+      }
       continue;
     }
     const starts = startsReadingParagraph(content);
@@ -103,6 +140,13 @@ function articleBlocks(runs, rules, width, height, part, title) {
     else blocks.push({type:'paragraph',runs:row.runs});
   }
   blocks.push(...tables);
+  for (let i = 0; i < blocks.length; i++) {
+    if (blocks[i].type !== 'table') continue;
+    blocks[i].context = [];
+    for (let j = i - 1; j >= 0 && ['heading', 'annotation', 'document-title', 'metadata', 'continuation'].includes(blocks[j].type); j--) {
+      blocks[i].context.push(blocks[j].runs.map(run => run.text).join(''));
+    }
+  }
   return blocks;
 }
 
@@ -123,6 +167,30 @@ function readingRules(paths) {
     }
   }
   return lines;
+}
+
+function splitReadingColumns(runs, paths, coordinates, width, height) {
+  if (!coordinates.length || !paths.length) return runs;
+  const verticals = readingRules(paths).filter(rule => !rule.h);
+  return runs.flatMap(run => {
+    const boundaries = [...new Set(verticals.filter(rule => rule.a <= run.y && rule.b >= run.y - run.size * .5 &&
+      rule.v > run.x + 1 && rule.v < run.x + run.width - 1).map(rule => rule.v))].sort((a,b) => a-b);
+    if (!boundaries.length || run.text.length < 2) return [run];
+    const groups = [];
+    for (let i = 0; i < run.text.length; i++) {
+      const box = coordinates[run.a + i];
+      if (!box) return [run];
+      const x = box[0] * width / 100;
+      const column = boundaries.filter(value => x >= value - .5).length;
+      if (!groups.length || groups.at(-1).column !== column) groups.push({column,start:i,end:i+1});
+      else groups.at(-1).end = i + 1;
+    }
+    return groups.map(({start,end}) => {
+      const first = coordinates[run.a + start], last = coordinates[run.a + end - 1];
+      return {...run,a:run.a+start,b:run.a+end,text:run.text.slice(start,end),x:first[0]*width/100,
+        width:(last[0]+last[2]-first[0])*width/100};
+    });
+  });
 }
 
 function verifyReadingUnderlines(runs, paths) {
@@ -148,8 +216,8 @@ function verifyReadingUnderlines(runs, paths) {
 
 function canDisplayReadingPart(blocks, decoded, part) {
   if (!blocks.length || blocks.some(block => block.type === 'table-layout')) return false;
-  const {runs, width, rules} = decoded;
-  const selected = runs.filter(run => run.a >= part.a && run.a < part.b);
+  const {runs, width, height, rules} = decoded;
+  const selected = runs.filter(run => run.a >= part.a && run.a < part.b && !readingFurniture(run, height));
   if (!selected.length) return false;
   const bands = new Map();
   const gutters = [];
@@ -161,9 +229,9 @@ function canDisplayReadingPart(blocks, decoded, part) {
     const band = bands.get(run.line) || [];
     const previous = band.at(-1);
     const gap = previous ? run.x - previous.x - previous.width : 0;
-    if (previous && (gap < -Math.min(run.size, previous.size) * .5 ||
+    if (previous && (run.x < previous.x - .5 || gap < -Math.max(run.size, previous.size) * 1.1 ||
         gap > Math.max(run.size * 2.8, width * .065))) return false;
-    if (gap >= Math.max(3, run.size * .55)) {
+    if (gap >= Math.max(3, run.size * 1.05)) {
       const center = run.x - gap / 2;
       const gutter = gutters.find(item => Math.abs(item.center - center) <= 2);
       if (gutter) gutter.lines.add(run.line);
@@ -183,6 +251,12 @@ function canDisplayReadingPart(blocks, decoded, part) {
           rule.a >= table.left - 1.5 && rule.b <= table.right + 1.5 :
           rule.v >= table.left - 1.5 && rule.v <= table.right + 1.5 &&
           rule.a >= table.top - 1.5 && rule.b <= table.bottom + 1.5))) return true;
+    const below = selected.some(run => run.y > rule.v && run.y < rule.v + run.size * 1.3 &&
+      run.x >= rule.a - 1 && run.x + run.width <= rule.b + 1);
+    const titleRule = rule.h && !below && rule.b - rule.a > width * .2 && selected.some(run =>
+      run.bold && run.y <= rule.v + 1 && rule.v - run.y < run.size * 1.4 &&
+      run.x >= rule.a - 1 && run.x + run.width <= rule.b + 1);
+    if (titleRule) return true;
     // A rule under styled text is safe only if it is covered by that underlined run.
     if (!rule.h) return false;
     const styled = selected.filter(run => run.underline && Math.abs(run.y - rule.v) <= run.size * .45 &&
@@ -242,8 +316,8 @@ function tableRegions(runs, paths, pageWidth, strict = false) {
     if(!inside.length)continue;
     const columns=xs.length-1,rowCount=ys.length-1;
     // Excessively fragmented drawings are retained geometrically instead of guessed as cells.
-    const fallback=()=>tables.push({type:'table-layout',runs:inside,rules,left,right,top,bottom});
-    if(columns*rowCount>4000){fallback();continue;}
+    const fallback=reason=>tables.push({type:'table-layout',reason,runs:inside,rules,left,right,top,bottom});
+    if(columns*rowCount>4000){fallback('fragmented');continue;}
     const cells=Array.from({length:columns*rowCount},(_,i)=>i),root=i=>cells[i]===i?i:(cells[i]=root(cells[i]));
     function closed(h,v,a,b){
       const spans=rules.filter(l=>l.h===h && Math.abs(l.v-v)<1.1 && l.b>a && l.a<b).map(l=>[Math.max(a,l.a),Math.min(b,l.b)]).sort((x,y)=>x[0]-y[0]);
@@ -253,7 +327,7 @@ function tableRegions(runs, paths, pageWidth, strict = false) {
     }
     if (strict && (!closed(true, top, left, right) || !closed(true, bottom, left, right) ||
         !closed(false, left, top, bottom) || !closed(false, right, top, bottom))) {
-      fallback();
+      fallback('open-border');
       continue;
     }
     for(let row=0;row<rowCount;row++)for(let col=0;col<columns;col++){
@@ -266,16 +340,17 @@ function tableRegions(runs, paths, pageWidth, strict = false) {
       const id=root(row*columns+col);if(!merged.has(id))merged.set(id,{r0:row,r1:row,c0:col,c1:col,n:0,runs:[]});
       const cell=merged.get(id);cell.r0=Math.min(cell.r0,row);cell.r1=Math.max(cell.r1,row);cell.c0=Math.min(cell.c0,col);cell.c1=Math.max(cell.c1,col);cell.n++;
     }
-    if([...merged.values()].some(c=>c.n!==(c.r1-c.r0+1)*(c.c1-c.c0+1))){fallback();continue;}
+    if([...merged.values()].some(c=>c.n!==(c.r1-c.r0+1)*(c.c1-c.c0+1))){fallback('irregular-cells');continue;}
     let crossesRule = false;
     for(const run of inside){
       const col=Math.max(0,Math.min(columns-1,xs.findIndex(x=>x>run.x+1)-1));
       const row=Math.max(0,Math.min(rowCount-1,ys.findIndex(y=>y>run.y-run.size*.3)-1));
       const cell = merged.get(root(row*columns+col));
-      crossesRule ||= run.x < xs[cell.c0] - 1.5 || run.x + run.width > xs[cell.c1 + 1] + 1.5;
+      const tolerance = Math.max(1.5,run.size * .7);
+      crossesRule ||= run.x < xs[cell.c0] - tolerance || run.x + run.width > xs[cell.c1 + 1] + tolerance;
       cell.runs.push(run);
     }
-    if (strict && crossesRule) { fallback(); continue; }
+    if (strict && crossesRule) { fallback('text-crosses-cells'); continue; }
     const rows=Array.from({length:rowCount},()=>[]);
     for(const cell of merged.values()){
       cell.lines=[];
@@ -298,7 +373,7 @@ function tableRegions(runs, paths, pageWidth, strict = false) {
     const hasStackedTimes = strict && rows.some(row => row.some(cell =>
       cell.lines.filter(line => /^\d{1,2}[:：.]\d{2}$/.test(line.runs.map(run => run.text).join(''))).length >= 2));
     if (hasUnruledRows || hasStackedTimes) {
-      fallback();
+      fallback(hasStackedTimes ? 'unruled-times' : 'unruled-rows');
       continue;
     }
     tables.push({type:'table',rows,xs,ys,left,right,top,bottom,runs:inside,columns,rules});
@@ -378,23 +453,29 @@ function tableProfile(table, title = '') {
 
 function joinTableContinuation(previous, nextBlocks, strict = false) {
   if (!previous?.type.startsWith('table')) return;
-  const first = nextBlocks[0];
-  const marker = first?.runs && !first.type.startsWith('table') &&
-    /^[（(]?(?:续上表|续表|接上表)[）)]?[:：]?$/.test(first.runs.map(run => run.text).join('').replace(/\s+/g, ''));
-  const next = nextBlocks[marker ? 1 : 0];
+  const key = text => text.normalize('NFKC').replace(/\s+/g, '');
+  const markerText = text => /^[（(]?(?:续上表|续表|接上表)[）)]?[:：]?$/.test(key(text));
+  const prefixLength = nextBlocks.findIndex(block => block.type.startsWith('table'));
+  if (prefixLength < 0) return;
+  const prefix = nextBlocks.slice(0, prefixLength);
+  const context = [previous.caption || '', ...previous.context || []].map(key).filter(Boolean);
+  if (prefix.some(block => !block.runs || !['heading', 'annotation', 'document-title', 'metadata', 'continuation', 'paragraph'].includes(block.type) ||
+      !markerText(block.runs.map(run => run.text).join('')) && !context.includes(key(block.runs.map(run => run.text).join(''))))) return;
+  const marker = prefix.some(block => markerText(block.runs.map(run => run.text).join('')));
+  const next = nextBlocks[prefixLength];
   if (!next?.type.startsWith('table')) return;
   const prior = previous.type === 'table-series' ? previous.tables.at(-1) : previous;
   const priorWidth = prior.right - prior.left;
   const nextWidth = next.right - next.left;
   if (Math.abs(priorWidth - nextWidth) > priorWidth * .08) return;
   function groupOriginalGrids() {
-    if (strict || !marker) return;
+    if (!marker || strict && (prior.type !== 'table' || next.type !== 'table')) return;
     if (previous.type !== 'table-series') {
       previous.tables = [{...previous}];
       previous.type = 'table-series';
     }
     previous.tables.push(next);
-    nextBlocks.splice(0, 2);
+    nextBlocks.splice(0, prefixLength + 1);
   }
   if (previous.type !== 'table' || next.type !== 'table' || next.columns !== previous.columns) {
     groupOriginalGrids();
@@ -414,8 +495,8 @@ function joinTableContinuation(previous, nextBlocks, strict = false) {
     /站名|车站名称|里程|区划|品名|名称|序号|项目|代码|接续线名|备注|^单位$/.test(tableCellText(cell))
   );
   // A header with merged cells can occupy multiple physical rows.
-  const headerRows = looksLikeHeading(previous.rows[0])
-    ? Math.max(...previous.rows[0].map(cell => cell.r1 + 1)) : 0;
+  const headerRows = strict ? tableProfile(previous, previous.caption).headerRows :
+    looksLikeHeading(previous.rows[0]) ? Math.max(...previous.rows[0].map(cell => cell.r1 + 1)) : 0;
   const repeated = headerRows > 0 && next.rows.length > headerRows &&
     previous.rows.slice(0, headerRows).every((row, i) =>
       row.every(cell => cell.r1 < headerRows) && rowKey(row) === rowKey(next.rows[i]));
@@ -432,5 +513,5 @@ function joinTableContinuation(previous, nextBlocks, strict = false) {
   })));
   previous.rows.push(...rows);
   previous.runs.push(...rows.flatMap(row => row.flatMap(cell => cell.runs)));
-  nextBlocks.splice(0, marker ? 2 : 1);
+  nextBlocks.splice(0, prefixLength + 1);
 }

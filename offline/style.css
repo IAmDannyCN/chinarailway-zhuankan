@@ -242,14 +242,14 @@ dialog::backdrop { background: #18302566; }
 .figure-text { margin-top: 6px; }
 .figure-text > div { padding: .65em .8em; background: var(--subtle); overflow-wrap: anywhere; }
 
-.reading-article .reading-line {
-  margin: 0; text-align: left; text-indent: 0; padding-inline-start: var(--line-indent, 0);
-}
+.reading-article .reading-paragraph { margin: 0 0 .65em; text-indent: var(--paragraph-indent, 2em); text-align: justify; }
 .reading-article .reading-annotation {
   margin: .6em 0; text-indent: 0; text-align: right;
 }
 .reading-centered { text-align: center; }
 .reading-bold { font-weight: 700; }
+.inline-symbol { display: inline-block; height: 1em; vertical-align: -.14em; background-repeat: no-repeat; }
+.inline-symbol > span { opacity: 0; }
 .article-table td:not(.table-prose):not(.table-station) { text-wrap: balance; }
 .article-table th { border: 1px solid #dce3dc; padding: .4em .3em; font-weight: inherit; text-align: center; text-wrap: balance; }
 .article-table .table-quantity, .article-table .table-fixed { font-variant-numeric: tabular-nums; }

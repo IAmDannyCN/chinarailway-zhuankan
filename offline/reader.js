@@ -100,7 +100,7 @@ function decodeFlow(document, number, markup) {
   const end = markup.indexOf('</svg>') + '</svg>'.length;
   const xml = new DOMParser().parseFromString(markup.slice(0, end), 'image/svg+xml');
   let offset=0;
-  const runs=[...xml.querySelectorAll('text')].map(node=>{
+  let runs=[...xml.querySelectorAll('text')].map(node=>{
     const text=node.textContent,a=offset;offset+=text.length;
     return {text,a,b:offset,line:node.getAttribute('data-line'),x:Number(node.getAttribute('x')),y:Number(node.getAttribute('y')),width:Number(node.getAttribute('textLength')),size:Number(node.getAttribute('font-size')),bold:node.getAttribute('font-weight')==='bold',underline:node.getAttribute('text-decoration')==='underline',p:number};
   });
@@ -111,10 +111,19 @@ function decodeFlow(document, number, markup) {
     a: Number(a), b: Number(b), width: Number(width), height: Number(height), p: number, src
   }));
   const rules = [...xml.querySelectorAll('path')].map(node => node.getAttribute('d'));
+  const coordinates = readingCoordinates.get(`${document.id}:${number}`) || [];
+  runs = splitReadingColumns(runs, rules, coordinates, ...document.sizes[number]);
+  for (const run of runs) {
+    if (/[\ue000-\uf8ff]/.test(run.text)) {
+      run.symbols = coordinates.slice(run.a, run.b);
+      run.symbolStart = run.a;
+      run.symbolPage = {src: `data/${document.id}/${number + 1}.original.webp`, size: document.sizes[number]};
+    }
+  }
   if (document.originalPages) verifyReadingUnderlines(runs, rules);
   return {runs, media, rules,
     sourceOnly: xml.documentElement.dataset?.source === 'true' || xml.documentElement.getAttribute('data-source') === 'true',
-    coordinates: readingCoordinates.get(`${document.id}:${number}`) || [],
+    coordinates,
     width:document.sizes[number][0],height:document.sizes[number][1]};
 }
 
@@ -201,11 +210,25 @@ function readingMatches(text) {
 function inlineRuns(runs) {
   const text = runs.map(run => run.text).join('');
   const merged = readingMatches(text);
-  function slice(a,b){let pos=0,out='';for(const run of runs){const start=Math.max(0,a-pos),end=Math.min(run.text.length,b-pos);if(end>start)out+=`<span data-page="${run.p}" data-offset="${run.a+start}"${run.bold ? ' class="reading-bold"' : ''}${run.underline ? ' style="text-decoration:underline"' : ''}>${escapeHtml(run.text.slice(start,end))}</span>`;pos+=run.text.length;if(pos>=b)break;}return out;}
+  function slice(a,b){let pos=0,out='';for(const run of runs){const start=Math.max(0,a-pos),end=Math.min(run.text.length,b-pos);if(end>start)out+=`<span data-page="${run.p}" data-offset="${run.a+start}"${run.bold ? ' class="reading-bold"' : ''}${run.underline ? ' style="text-decoration:underline"' : ''}>${readingRunText(run,start,end)}</span>`;pos+=run.text.length;if(pos>=b)break;}return out;}
   function location(at){let pos=0;for(const run of runs){if(at<pos+run.text.length)return {p:run.p,a:run.a+at-pos};pos+=run.text.length;}return {p:0,a:0};}
   let cursor=0,out='';
   for(const [a,b] of merged){const loc=location(a);out+=slice(cursor,a)+`<mark data-page="${loc.p}" data-offset="${loc.a}">${slice(a,b)}</mark>`;cursor=b;}
   return out+slice(cursor,text.length);
+}
+
+function readingRunText(run, start, end) {
+  const value = run.text.slice(start, end);
+  if (!run.symbols || !run.symbolPage) return escapeHtml(value);
+  return [...value].map((character, index) => {
+    const box = run.symbols[run.a + start + index - run.symbolStart];
+    if (!/[\ue000-\uf8ff]/.test(character) || !box || box[2] <= 0 || box[3] <= 0) return escapeHtml(character);
+    const [x, y, width, height] = box;
+    const [pageWidth, pageHeight] = run.symbolPage.size;
+    const ratio = width * pageWidth / (height * pageHeight);
+    const position = `${x / (100 - width) * 100}% ${y / (100 - height) * 100}%`;
+    return `<span class="inline-symbol" aria-label="原刊符号" style="width:${ratio}em;background-image:url('${run.symbolPage.src}');background-size:${10000 / width}% ${10000 / height}%;background-position:${position}"><span>${escapeHtml(character)}</span></span>`;
+  }).join('');
 }
 
 function originalHighlights(block) {
@@ -345,9 +368,9 @@ function blocksHTML(blocks) {
         <figcaption>${label} · PDF ${block.p + 1} 页</figcaption>${text}</figure>`;
     }
     const tag = block.type === 'document-title' ? 'h2' : block.type === 'heading' ? 'h3' : 'p';
-    const className = block.centered ? 'reading-centered' : block.type === 'annotation' ? 'reading-annotation'
-      : block.type === 'line' ? 'reading-line' : block.type === 'metadata' ? 'article-note' : '';
-    const style = block.type === 'line' ? ` style="--line-indent:${block.indent}em"` : '';
+    const className = block.centered ? 'reading-centered' : block.type === 'annotation' || block.alignedRight ? 'reading-annotation'
+      : block.type === 'paragraph' && block.indent != null ? 'reading-paragraph' : block.type === 'metadata' ? 'article-note' : '';
+    const style = block.type === 'paragraph' && block.indent != null ? ` style="--paragraph-indent:${block.indent}em"` : '';
     return `<${tag} class="${className}"${style}>${inlineRuns(block.runs)}</${tag}>`;
   }).join('');
 }
@@ -376,9 +399,12 @@ async function renderReadingSection(entry, serial, wholeIssue = false, original 
     previousPage = part.p;
     const last=blocks.at(-1),first=fresh[0];
     if (last?.type === 'paragraph' && first?.type === 'paragraph' &&
-        !/[。；;：:！？!?]$/.test(last.runs.at(-1).text) &&
+        (entry.document.originalPages ? last.openEnd && first.continued : !/[。；;：:！？!?]$/.test(last.runs.at(-1).text)) &&
         !startsReadingParagraph(first.runs.map(run => run.text).join(''))) {
-      last.runs.push(...fresh.shift().runs);
+      const next = fresh.shift();
+      last.runs.push(...next.runs);
+      last.lastRow = next.lastRow;
+      last.openEnd = next.openEnd;
     }
     blocks.push(...fresh);
   }

@@ -1015,7 +1015,7 @@ def render_document(source, output, layout=None):
     if layout is None:
         layout = extract_document(source, output)
     folder = output / 'data' / layout['id']
-    spec = dict(digest=layout['digest'], format='html-text-7', pages=len(layout['pages']))
+    spec = dict(digest=layout['digest'], format='html-text-8', pages=len(layout['pages']))
     manifest = folder / 'html.json'
     saved = json.loads(manifest.read_text()) if manifest.exists() else {}
     same_render = all(saved.get(key) == value for key, value in spec.items())
@@ -1063,7 +1063,7 @@ def render_document(source, output, layout=None):
             elements = []
             drawings = page.get_drawings() if not page.rotation else []
             source_only = (data['uncertain'] or not data['t'] or bool(page.get_image_info())
-                           or bool(re.search(r'[\ue000-\uf8ff\ufffd]', display))
+                           or '\ufffd' in display or bool(re.search(r'([\ue000-\uf8ff])\1{5,}', display))
                            or any(kind == 'fill-shade' for kind, _ in page.get_bboxlog()))
             for drawing in drawings:
                 commands = []
