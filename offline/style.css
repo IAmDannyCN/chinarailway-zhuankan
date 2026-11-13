@@ -248,12 +248,18 @@ dialog::backdrop { background: #18302566; }
 }
 .reading-centered { text-align: center; }
 .reading-bold { font-weight: 700; }
-.inline-symbol { display: inline-block; height: 1em; vertical-align: -.14em; background-repeat: no-repeat; }
-.inline-symbol > span { opacity: 0; }
+.inline-symbol { position: relative; display: inline-block; height: 1em; vertical-align: -.14em; background-repeat: no-repeat; line-height: 1; white-space: nowrap; overflow: hidden; }
+.inline-symbol > span { position: absolute; inset: 0; opacity: 0; }
+mark .inline-symbol { mix-blend-mode: multiply; }
+.clause-number { white-space: nowrap; }
+.clause-marker-end { margin-inline-end: var(--clause-gap, .35em); }
 .article-table td:not(.table-prose):not(.table-station) { text-wrap: balance; }
 .article-table th { border: 1px solid #dce3dc; padding: .4em .3em; font-weight: inherit; text-align: center; text-wrap: balance; }
 .article-table .table-quantity, .article-table .table-fixed { font-variant-numeric: tabular-nums; }
 .article-table .table-nowrap { white-space: nowrap; }
+.article-table td:has(> .cell-band) { vertical-align: top; }
+.cell-band { display: flex; align-items: center; justify-content: inherit; }
+.table-quantity > .cell-band, .table-fixed > .cell-band { justify-content: center; }
 .article-table [data-family="fare"] .table-quantity, .article-table [data-family="statistics"] .table-quantity {
   text-align: right; padding-inline-end: .65em;
 }

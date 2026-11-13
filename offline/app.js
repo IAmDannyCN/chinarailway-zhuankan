@@ -10,6 +10,7 @@ const normalize = text => text.normalize('NFKC')
   .replace(/[］】〕]/g, ']')
   .replace(/（/g, '(')
   .replace(/）/g, ')')
+  .replace(/。/g, '.')
   .toLowerCase();
 
 window.PAGE_COORDS = {};
@@ -64,7 +65,8 @@ $('scopeList').innerHTML = [...catalog.docs].reverse().map(document => `
 $('collectionStats').textContent = `${years.length ? years[0] + '—' + years.at(-1) + ' 年 · ' : ''}${catalog.docs.length} 份专刊 · ${catalog.docs.reduce((total, document) => total + document.pages, 0)} 页`;
 
 function highlighted(text) {
-  if (!terms.length) return escapeHtml(text);
+  const display=readingPunctuation(text);
+  if (!terms.length) return escapeHtml(display);
   // Normalization can expand punctuation, so retain each character's source range.
   let normalized = '';
   let sourceOffset = 0;
@@ -95,11 +97,11 @@ function highlighted(text) {
   let output = '';
   let previousEnd = 0;
   for (const [start, end] of merged) {
-    output += escapeHtml(text.slice(previousEnd, start));
-    output += `<mark>${escapeHtml(text.slice(start, end))}</mark>`;
+    output += escapeHtml(display.slice(previousEnd, start));
+    output += `<mark>${escapeHtml(display.slice(start, end))}</mark>`;
     previousEnd = end;
   }
-  return output + escapeHtml(text.slice(previousEnd));
+  return output + escapeHtml(display.slice(previousEnd));
 }
 
 function search(route = {}) {

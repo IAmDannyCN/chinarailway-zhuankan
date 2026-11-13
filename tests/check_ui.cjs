@@ -1,0 +1,14 @@
+const fs=require('fs'),assert=require('assert');
+const source=fs.readFileSync(__dirname+'/../offline/app.js','utf8');
+const start=source.indexOf('function renderResults()'),end=source.indexOf('\nfunction ',start+1);
+const element={innerHTML:''};const $=()=>element;const escapeHtml=String,highlighted=String;
+const document={labels:['1'],year:2025,issue:'1期',file:'sample.pdf'};
+const parent={id:'parent',title:'通知',kind:'文件',p:0,parts:[{p:0}],searchParts:[],document};
+const child={id:'child',parentId:'parent',title:'附件表',kind:'附件',p:0,parts:[{p:0}],searchParts:[],document};
+const entries=[parent,child],results=[{entry:child,matchedParts:[],count:1}],visibleLimit=80,terms=[],selected=null;
+eval(source.slice(start,end));renderResults();
+assert(element.innerHTML.includes('通知'));
+assert(element.innerHTML.includes('role="group" aria-label="附件"'));
+assert(element.innerHTML.indexOf('data-id="parent"')<element.innerHTML.indexOf('attachment-children'));
+assert(element.innerHTML.indexOf('data-id="child"')>element.innerHTML.indexOf('attachment-children'));
+console.log('通过：只命中附件时仍显示父文件，附件位于子分组内。');

@@ -38,7 +38,9 @@ function issueSections(document, sourcePages = new Set()) {
 }
 
 function issueChapters(document, sections) {
-  const bookmarks = (document.toc || []).filter(([, title]) => title.trim());
+  const rawBookmarks = (document.toc || []).map(([level,title,page])=>
+    [level,title.replace(/\ufffd+/g,'').trim(),page]).filter(([, title]) => title);
+  const bookmarks=rawBookmarks.filter(([,title])=>!/^.*\.(?:pdf|docx?|xls[x]?)$/i.test(title));
   if (bookmarks.some(([, , p]) => p > 0 && p <= document.pages)) {
     const bookmarkTitle = value => normalize(value).replace(/^(?:[一二三四五六七八九十百]+、|[0-9]+[.、])/, '')
       .replace(/\([^)]*\d[^)]*\)$/, '');
@@ -93,7 +95,7 @@ function openIssue(document, original = false) {
   const contents = $('issueContents');
   contents.style.setProperty('--chapter-page-digits', Math.max(3, String(document.pages).length));
   contents.innerHTML = chapters.map(({level, title, p, date}, index) => {
-    const label = `<span>${escapeHtml(title)}${date ? '<time>' + escapeHtml(date) + '</time>' : ''}</span>`;
+    const label = `<span>${escapeHtml(readingPunctuation(title))}${date ? '<time>' + escapeHtml(date) + '</time>' : ''}</span>`;
     const style = `style="--chapter-indent:${Math.min(6, Math.max(0, level - 1))}"`;
     return p == null ? `<div class="chapter-label" ${style}>${label}</div>` :
       `<button class="chapter-link" ${style} data-chapter="${index}">${label}<small>${p + 1}</small></button>`;
@@ -234,7 +236,7 @@ async function jumpInIssue(target, revealChapter = true) {
   } else scrollReaderTo(anchor, target.match);
   saveIssuePosition(view, target.start ? $('pageStack').querySelector('header') : anchor);
   view.pending = false;
-  $('previewTitle').textContent = slot.entry.title;
+  $('previewTitle').textContent = readingPunctuation(slot.entry.title);
   markIssueChapter(view, view.anchor, revealChapter);
   updateReadingPosition();
 }
@@ -262,6 +264,6 @@ function syncIssuePosition() {
   view.anchor = node ? {p: page, a: Number(node.dataset.offset), y: node.getBoundingClientRect().top - top} : {p: page};
   saveIssuePosition(view, node || slot.node);
   markIssueChapter(view, view.anchor);
-  $('previewTitle').textContent = slot.entry.title;
+  $('previewTitle').textContent = readingPunctuation(slot.entry.title);
   updateReadingPosition();
 }

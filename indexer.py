@@ -11,13 +11,14 @@ import shutil
 import unicodedata
 import time
 import html
+import xml.etree.ElementTree as ET
 from difflib import SequenceMatcher
 
 import pymupdf
 from PIL import Image
 
 EXTRACT_VERSION = 8
-SEGMENT_VERSION = 'library-5-html'
+SEGMENT_VERSION = 'library-7-regions-boundaries'
 CATEGORIES = set('部令 各局处文件 货运 国际联运 客货运输 客、货运输 客运规章 货运规章 客货运管理 运营管理 客运管理 货运管理 货物运价 客货运运价 客货运价里程表 铁路专用线专用铁路名称表 法律文件 法规文件 法律法规 经济法规 价格管理 运输条件 客运运价 货运运价 其他 其它 客运 规章文件 运输组织 客货运输管理'.split())
 CATEGORIES.update(['国务院文件', '其他文件', '铁路运输企业管理', '运输收入', '综合管理'])
 # EU-BZ's embedded ToUnicode table substitutes these Han characters for digits and Latin glyphs.
@@ -32,7 +33,17 @@ REFERENCE = re.compile(r'(?:[\u4e00-\u9fff]{0,16}[〔(\[]\d{2,4}[〕)\]][\u4e00-
 STRUCTURAL_HEADING = re.compile(r'^第[一二三四五六七八九十百千万0-9]+[编篇章节条]')
 
 
+def attachment_label(line):
+    """Normalize the ordinal in a known symbolic font, never Chinese body text."""
+    text = line['t']
+    match = re.match(r'^(附件|附表|附录)([园员圆猿源缘远苑愿怨]+)([:：]?)$', text)
+    if match and 'EU-' in line.get('fonts', ''):
+        return match[1] + ''.join(EU_GLYPHS.get(char, char) for char in match[2]) + match[3]
+    return text
+
+
 def reference_line(text):
+    text = re.sub(r'[（(](?:不另行文|补登|补刊|重登|重刊|转发|节录|摘要)[）)]$', '', text)
     text = re.sub(r'^\d{4}年\d{1,2}月\d{1,2}日', '', text)
     return bool(re.fullmatch(REFERENCE.pattern + r'(?:电|文|令)?', text)
                 or re.fullmatch(r'[\u4e00-\u9fff\d〔〕()\[\]]{2,60}字第?\d+号(?:电|文|令)?', text))
@@ -40,6 +51,7 @@ def reference_line(text):
 
 def authority_heading(text):
     text = re.sub(r'\((?:电报|通知|文件|命令)\)$', '', text)
+    text = re.sub(r'(?:业务解释|业务答复)$', '', text)
     if text == '中华人民共和国':
         return True
     if re.fullmatch(r'中华人民共和国(?:主席|国务院总理)[\u4e00-\u9fff]{0,6}', text):
@@ -258,11 +270,12 @@ def attachment_title(pages, page_index, line_index):
     if authority_heading(first['t']) and not bold_font(first):
         return None
     # “锅炉附件” in a narrow commodity column is not an attachment heading.
-    if (marker['x'] > page['w'] * .3 and first['x'] < marker['x'] - page['w'] * .06
+    if (marker['x'] > page['w'] * .3 and marker['y'] > page['h'] * .18
+            and not re.search(r'\d|[一二三四五六七八九十]', attachment_label(marker))
             and not bold_font(marker) and not bold_font(first)
             and ('品类' in page['t'][:300] or '专用线名称' in page['t'][:300])):
         return None
-    if ATTACHMENT.fullmatch(first['t']) or re.search(r'^[一二三四五六七八九〇○零\d]{2,}年', first['t']):
+    if ATTACHMENT.fullmatch(attachment_label(first)) or re.search(r'^[一二三四五六七八九〇○零\d]{2,}年', first['t']):
         return None
     # Reprinted orders have their own authority, reference and title inside the attachment.
     group = next((group for group in heading_groups(page) if marker['b'] <= group[0]['a']
@@ -283,11 +296,100 @@ def attachment_title(pages, page_index, line_index):
     return ''.join(title) or None
 
 
+def closed_rule_regions(paths):
+    """Closed straight-rule grids, used only to reject weak table-cell headings."""
+    lines = []
+    def add(x, y, x2, y2):
+        if abs(y - y2) < .6 and abs(x - x2) > 1:
+            lines.append((True, y, min(x, x2), max(x, x2)))
+        elif abs(x - x2) < .6 and abs(y - y2) > 1:
+            lines.append((False, x, min(y, y2), max(y, y2)))
+    number = r'(-?[\d.]+)'
+    for path in paths:
+        for match in re.finditer('M' + number + ',' + number + 'L' + number + ',' + number, path):
+            add(*map(float, match.groups()))
+        for match in re.finditer('M' + number + ',' + number + 'h' + number + 'v' + number, path):
+            x, y, w, h = map(float, match.groups())
+            if abs(h) <= 1.2:
+                add(x, y + h / 2, x + w, y + h / 2)
+            elif abs(w) <= 1.2:
+                add(x + w / 2, y, x + w / 2, y + h)
+            else:
+                add(x, y, x + w, y)
+                add(x + w, y, x + w, y + h)
+                add(x + w, y + h, x, y + h)
+                add(x, y + h, x, y)
+    parent = list(range(len(lines)))
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for i, a in enumerate(lines):
+        for j, b in enumerate(lines[:i]):
+            meets = (abs(a[1] - b[1]) < 1.3 and max(a[2], b[2]) <= min(a[3], b[3]) + 1.5 if a[0] == b[0]
+                     else a[1] >= b[2] - 1.3 and a[1] <= b[3] + 1.3 and b[1] >= a[2] - 1.3 and b[1] <= a[3] + 1.3)
+            if meets:
+                parent[root(i)] = root(j)
+    groups = collections.defaultdict(list)
+    for i, line in enumerate(lines):
+        groups[root(i)].append(line)
+    regions = []
+    for group in groups.values():
+        xs, ys = sorted({line[1] for line in group if not line[0]}), sorted({line[1] for line in group if line[0]})
+        if len(xs) < 3 or len(ys) < 3:
+            continue
+        left, right, top, bottom = xs[0], xs[-1], ys[0], ys[-1]
+        def covered(horizontal, value, start, end):
+            spans = sorted((max(start, a), min(end, b)) for h, v, a, b in group if h == horizontal and abs(v - value) < 1.3 and a < end and b > start)
+            cursor, total, gap = start, 0, 0
+            for a, b in spans:
+                if b > cursor:
+                    gap = max(gap, a - cursor)
+                    total += b - max(a, cursor)
+                    cursor = b
+            return max(gap, end - cursor) <= 1.5 and total >= (end - start) * .85
+        if (right - left > 35 and bottom - top > 20 and covered(True, top, left, right)
+                and covered(True, bottom, left, right) and covered(False, left, top, bottom)
+                and covered(False, right, top, bottom)):
+            regions.append((left, top, right, bottom))
+    return regions
+
+
 def segment_document(layout, source, output):
     pages, ident = layout['pages'], layout['id']
     year, issue, issue_order = metadata(layout['file'])
     support = support_pages(pages)
     candidates, warnings = [], []
+    grid_cache = {}
+
+    def table_body_heading(group, page_index):
+        if page_index not in grid_cache:
+            asset = Path(output) / 'data' / ident / f'{page_index + 1}.page.js'
+            paths = []
+            if asset.is_file():
+                _, markup = read_page_asset(asset, f'{ident}:{page_index}')
+                paths = re.findall(r'<path d="([^"]*)"', markup)
+            else:
+                with pymupdf.open(source) as pdf:
+                    original = pdf[page_index]
+                    for drawing in original.get_drawings():
+                        for item in drawing['items']:
+                            if item[0] == 'l':
+                                a, b = item[1:3]
+                                if original.rotation:
+                                    a, b = a * original.rotation_matrix, b * original.rotation_matrix
+                                paths.append(f'M{a.x},{a.y}L{b.x},{b.y}')
+                            elif item[0] == 're':
+                                rect = item[1] * original.rotation_matrix if original.rotation else item[1]
+                                paths.append(f'M{rect.x0},{rect.y0}h{rect.width}v{rect.height}h{-rect.width}Z')
+            grid_cache[page_index] = closed_rule_regions(paths)
+        left, top = min(line['x'] for line in group), min(line['y'] for line in group)
+        right, bottom = max(line['right'] for line in group), max(line['bottom'] for line in group)
+        size = max(line['size'] for line in group)
+        return any(left >= rect[0] - 1 and right <= rect[2] + 1 and
+                   top >= rect[1] + size * 1.5 and bottom <= rect[3] + 1
+                   for rect in grid_cache[page_index])
     if layout.get('fontWarnings'): warnings.append(dict(type='原件字体兼容',page=1,title=layout['fontWarnings'][:350]))
     category, clip, clip_header = '综合与运营', False, '剪贴页'
     for i, page in enumerate(pages):
@@ -321,7 +423,8 @@ def segment_document(layout, source, output):
                          or (title.endswith(('办法', '规定', '条例', '规则'))
                              and (group[0]['y'] < 160 or paired_appendix)))
                     and not authority_heading(title)
-                    and not title.endswith(('部', '局', '公司', '委员会', '令', '文件', '法院', '检察院'))):
+                    and not title.endswith(('部', '局', '公司', '委员会', '令', '文件', '法院', '检察院'))
+                    and not table_body_heading(group, i)):
                 groups.append(group)
         headers = clipping_headers(page)
         strong_clip = any(line['y'] < page['h'] * .25 for line in headers)
@@ -367,10 +470,18 @@ def segment_document(layout, source, output):
                 attachments.append(dict(p=i, a=line['a'], title=inline[2], attachmentLabel=label,
                                         category=category, kind='附件', confidence='同行附件标题识别'))
                 continue
-            if ATTACHMENT.fullmatch(line['t']):
+            if ATTACHMENT.fullmatch(attachment_label(line)):
                 title = attachment_title(pages, i, k)
+                # An explicit appendix ordinal can lead straight into a grid,
+                # without a second, centered caption. Do not swallow it into
+                # the previous appendix merely because the caption is absent.
+                if (not title and re.search(r'\d|[一二三四五六七八九十]', attachment_label(line))
+                        and (bold_font(line) or flush_left) and k + 1 < len(lines)):
+                    following = ''.join(other['t'] for other in lines[k + 1:k + 5])
+                    if sum(word in following for word in ['站名', '专用线名称', '发送', '到达', '品类', '局别', '里程', '能力', '序号']) >= 3:
+                        title = attachment_label(line).rstrip(':：')
                 if title:
-                    attachments.append(dict(p=i, a=line['a'], title=title, attachmentLabel=line['t'].rstrip(':：'),
+                    attachments.append(dict(p=i, a=line['a'], title=title, attachmentLabel=attachment_label(line).rstrip(':：'),
                                             category=category, kind='附件', confidence='附件标题识别'))
             elif re.match(r'^附[:：].{3,45}$', line['t']) and bold_font(line):
                 attachments.append(dict(p=i, a=line['a'], title=line['t'][2:], attachmentLabel='附',
@@ -496,12 +607,54 @@ def segment_document(layout, source, output):
                     break
         if not matched:
             warnings.append(dict(type='书签未核准', page=max(1, page_number), title=title))
+    encoded_pages = {i for i, page in enumerate(pages) if page['t'] and
+                     sum(len(line['t']) for line in page['lines'] if 'BookMaker' in line['fonts']) > len(page['t']) * .4}
+    candidates = [candidate for candidate in candidates if candidate['p'] not in encoded_pages or
+                  len(re.findall(r'[\u4e00-\u9fff]', candidate['title'].translate(
+                      str.maketrans('', '', '园员圆猿源缘远苑愿怨')))) >= 4]
+    for i in sorted(encoded_pages):
+        if i - 1 in encoded_pages or any(candidate['p'] == i for candidate in candidates):
+            continue
+        bookmark = next((heading_text(title) for _, title, number in layout['toc']
+                         if number == i + 1 and len(re.findall(r'[\u4e00-\u9fff]', title)) >= 4), '')
+        candidates.append(dict(p=i, a=0, title=bookmark or f'原刊内容 · PDF第{i + 1}页',
+                               category='综合与运营', kind='文件', confidence='原字体编码保留'))
+
+    # Reclaim a publisher/reference prefix stranded at the preceding page foot.
+    # A standalone sign-off date before that prefix prevents body quotations
+    # from being mistaken for a new document header.
+    for candidate in candidates:
+        i = candidate['p']
+        if i <= 0 or candidate['kind'] != '文件' or i - 1 in support:
+            continue
+        before = [line for line in pages[i]['lines'] if line['b'] <= candidate['a']]
+        if any(line['y'] > 65 and not re.fullmatch(r'[\d.·()（）—-]+', line['t']) for line in before):
+            continue
+        tail = [line for line in pages[i - 1]['lines'] if not
+                (line['y'] < 60 and re.fullmatch(r'[\d.·()（）—-]+', line['t']))]
+        prefix = []
+        while tail and (reference_line(tail[-1]['t']) or authority_heading(tail[-1]['t'])):
+            prefix.insert(0, tail.pop())
+        if not prefix or not any(authority_heading(line['t']) and bold_font(line) for line in prefix):
+            continue
+        refs = [line['t'] for line in prefix if reference_line(line['t'])]
+        if not refs and not candidate.get('reference'):
+            continue
+        if not any(SIGNOFF_DATE.fullmatch(line['t']) for line in tail[-8:]):
+            continue
+        candidate.update(p=i - 1, a=prefix[0]['a'],
+                         reference='／'.join(dict.fromkeys([*refs, *filter(None, [candidate.get('reference')])])),
+                         issuer='／'.join(line['t'] for line in prefix if authority_heading(line['t'])))
     candidates.sort(key=lambda item: (item['p'], item['a'], item['kind'] != '附件'))
     candidates = [c for c in candidates if not (re.fullmatch(r'(?:最高)?人民法院公告', c['title']) and
                   any(other['p'] == c['p'] and other['title'] != c['title'] and '最高人民法院' in other['title'] for other in candidates))]
     cleaned = []
     first_offset_by_page = {}
     for candidate in candidates:
+        # Ornament fonts occasionally extract as repeated private-use glyphs.
+        # They cannot name a document; their text remains inside the prior entry.
+        if not re.search(r'[\u4e00-\u9fffA-Za-z0-9]', candidate['title']):
+            continue
         # Repeated running table headings stay part of the existing table.
         if cleaned and candidate['kind'] == '文件' and candidate['title'] == cleaned[-1]['title'] and candidate['p'] <= cleaned[-1]['p'] + 1:
             continue
@@ -532,7 +685,8 @@ def segment_document(layout, source, output):
             continue
         first_text = '\n'.join(line['t'] for line in pages[candidate['p']]['lines']
                                if candidate['a'] <= line['a'] < candidate['a'] + 180)
-        number = REFERENCE.search(first_text)
+        # References quoted inside an attachment table are not its document number.
+        number = REFERENCE.search(first_text) if candidate['kind'] == '文件' else None
         entry = dict(candidate, id=f'{ident}-{len(entries)}', parts=parts,
                      number=candidate.get('reference') or (number[0] if number else ''), topic=classify(candidate['title'], candidate['category']))
         entry['title'] = heading_text(entry['title'])
@@ -1009,13 +1163,431 @@ def write_original_page(page, path):
         temporary.replace(path)
 
 
+def reading_media_regions(page, data, drawings, boxes, display):
+    """Keep figures and unknown glyphs locally, without rasterizing neighbouring text/tables.
+
+    Rectangles use PDF points. a/b keep original source offsets; consumers must
+    select covered characters geometrically because PDF text order can interleave cells.
+    """
+    bounds = page.rect
+    images = visible_image_boxes(page)
+    source_only = bool(page.rotation or not data['t'] or any(
+        rect.width >= bounds.width * .85 and rect.height >= bounds.height * .85 for rect in images))
+    if source_only:
+        return True, []
+
+    coordinates = [pymupdf.Rect(box[0] * data['w'] / 100, box[1] * data['h'] / 100,
+                               (box[0] + box[2]) * data['w'] / 100,
+                               (box[1] + box[3]) * data['h'] / 100) for box in boxes]
+    composites = []
+    axis, seeds, symbols = [], [], []
+    diagonal_shapes = []
+    text_symbols = []
+    for drawing in drawings:
+        complex_shape = False
+        diagonal = False
+        horizontal = vertical = 0
+        for item in drawing['items']:
+            if item[0] == 'l':
+                a, b = item[1:3]
+                if abs(a.x - b.x) < .6:
+                    vertical += 1
+                elif abs(a.y - b.y) < .6:
+                    horizontal += 1
+                else:
+                    complex_shape = True
+                    diagonal = True
+            elif item[0] == 're':
+                horizontal += 2
+                vertical += 2
+            else:
+                complex_shape = True
+        rect = pymupdf.Rect(drawing['rect']) & bounds
+        if complex_shape:
+            seeds.append(rect)
+        if diagonal:
+            diagonal_shapes.append(rect)
+        if horizontal or vertical:
+            axis.append((rect, horizontal, vertical))
+
+    # Connected straight-rule grids distinguish a small cell symbol from a node
+    # of a route map. The latter is joined to its connecting strokes below.
+    groups = []
+    for rect, h, v in axis:
+        region, horizontal, vertical = rect, h, v
+        for i in range(len(groups) - 1, -1, -1):
+            other, oh, ov = groups[i]
+            if not (pymupdf.Rect(region.x0 - 1, region.y0 - 1, region.x1 + 1, region.y1 + 1) &
+                    pymupdf.Rect(other.x0 - 1, other.y0 - 1, other.x1 + 1, other.y1 + 1)).is_empty:
+                region |= other
+                horizontal += oh
+                vertical += ov
+                groups.pop(i)
+        groups.append((region, horizontal, vertical))
+    grids = [rect for rect, h, v in groups if h >= 3 and v >= 3 and
+             rect.width > bounds.width * .12 and rect.height > 12]
+
+    figures = []
+    for rect in [*images, *seeds]:
+        small = max(rect.width, rect.height) <= 26
+        text_near = any(line['y'] - 4 <= (rect.y0 + rect.y1) / 2 <= line['bottom'] + 4
+                        for line in data['lines'])
+        if small and (any(rect in grid for grid in grids) or rect in images and text_near):
+            symbols.append(rect)
+        else:
+            figures.append(rect)
+    # Grow diagram components only through their own strokes; a table above or
+    # alongside a figure is not pulled into the original-image region.
+    strokes = [rect for rect, _, _ in axis if not any(rect in grid for grid in grids)]
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(figures)):
+            rect = figures[i]
+            expanded = pymupdf.Rect(rect.x0 - 1.5, rect.y0 - 1.5, rect.x1 + 1.5, rect.y1 + 1.5)
+            for j in range(len(strokes) - 1, -1, -1):
+                stroke = strokes[j]
+                padded = pymupdf.Rect(stroke.x0 - .5, stroke.y0 - .5, stroke.x1 + .5, stroke.y1 + .5)
+                if not (expanded & padded).is_empty:
+                    figures[i] |= stroke
+                    strokes.pop(j)
+                    changed = True
+            for j in range(len(figures) - 1, i, -1):
+                other = figures[j]
+                if not (expanded & pymupdf.Rect(other.x0 - 1, other.y0 - 1, other.x1 + 1, other.y1 + 1)).is_empty:
+                    figures[i] |= other
+                    figures.pop(j)
+                    changed = True
+                    break
+            if changed:
+                break
+
+    # Only fonts known to encode symbols with bogus Han/Hangul mappings are
+    # treated this way. Ordinary Korean/Russian international-traffic text stays text.
+    raw = page.get_text('rawdict', flags=pymupdf.TEXTFLAGS_RAWDICT & ~pymupdf.TEXT_PRESERVE_IMAGES)
+    bad_glyph_boxes = []
+    encoded_boxes = []
+    glyph_positions = collections.defaultdict(list)
+    glyph_origins = collections.defaultdict(list)
+    for offset, box in enumerate(coordinates):
+        glyph_positions[(round(box.x0), round(box.y0))].append(offset)
+    for block in raw['blocks']:
+        for line in block.get('lines', []):
+            if abs(line['dir'][1]) > .02 or line['dir'][0] < .99:
+                figures.append(pymupdf.Rect(line['bbox']) & bounds)
+            for span in line['spans']:
+                for char in span['chars']:
+                    value = norm(char['c'])
+                    if len(value) != 1:
+                        continue
+                    glyph = pymupdf.Rect(char['bbox'])
+                    x, y = round(glyph.x0), round(glyph.y0)
+                    for dx in (-1, 0, 1):
+                        for dy in (-1, 0, 1):
+                            for offset in glyph_positions.get((x + dx, y + dy), []):
+                                if (offset < len(display) and norm(display[offset]) == value
+                                        and max(abs(a - b) for a, b in zip(coordinates[offset], glyph)) < .06):
+                                    origin = char['origin']
+                                    glyph_origins[(round(origin[0]), round(origin[1]), value)].append((offset, origin))
+                if 'BookMaker' in span['font']:
+                    rect = pymupdf.Rect(span['bbox']) & bounds
+                    grid = next((grid for grid in grids if rect in grid), None)
+                    encoded_boxes.append(grid or rect)
+                    continue
+                if not re.search(r'(?:^|\+)E-[BH]Z|Symbol', span['font'], re.I):
+                    continue
+                # Font bounding boxes can overlap the following physical line.
+                # Match the actual source glyph, never every character whose
+                # top-left corner happens to fall inside a symbol-font span.
+                for char in span['chars']:
+                    value = norm(char['c'])
+                    if len(value) != 1 or not re.match(r'[\u4e00-\u9fff\uac00-\ud7ff\ue000-\uf8ff]', value):
+                        continue
+                    if value == '暋' and fontname(span['font']).startswith(('E-BZ', 'E-HZ')):
+                        continue
+                    glyph = pymupdf.Rect(char['bbox'])
+                    x, y = round(glyph.x0), round(glyph.y0)
+                    for dx in (-1, 0, 1):
+                        for dy in (-1, 0, 1):
+                            for offset in glyph_positions.get((x + dx, y + dy), []):
+                                box = coordinates[offset]
+                                if (offset < len(display) and norm(display[offset]) == value
+                                        and max(abs(a - b) for a, b in zip(box, glyph)) < .06):
+                                    bad_glyph_boxes.append((box, offset))
+    for match in re.finditer(r'\ufffd|([\ue000-\uf8ff])\1{5,}', display):
+        for offset in range(match.start(), match.end()):
+            text_symbols.append((coordinates[offset], offset))
+    painted_boxes = page.get_bboxlog()
+    for kind, bbox in painted_boxes:
+        if kind == 'fill-shade':
+            figures.append(pymupdf.Rect(bbox) & bounds)
+
+    encoded_regions = []
+    for rect in encoded_boxes:
+        if rect.is_empty:
+            continue
+        region = pymupdf.Rect(rect)
+        changed = True
+        while changed:
+            changed = False
+            for i in range(len(encoded_regions) - 1, -1, -1):
+                other = encoded_regions[i]
+                nearby = pymupdf.Rect(region.x0 - 4, region.y0 - 5, region.x1 + 4, region.y1 + 5)
+                if not (nearby & other).is_empty:
+                    region |= other
+                    encoded_regions.pop(i)
+                    changed = True
+        encoded_regions.append(region)
+    figures.extend(encoded_regions)
+
+    merged_figures = []
+    for rect in figures:
+        if rect.is_empty:
+            continue
+        merged = pymupdf.Rect(rect)
+        changed = True
+        while changed:
+            changed = False
+            for i in range(len(merged_figures) - 1, -1, -1):
+                other = merged_figures[i]
+                padded = pymupdf.Rect(merged.x0 - 1, merged.y0 - 1, merged.x1 + 1, merged.y1 + 1)
+                if not (padded & other).is_empty:
+                    merged |= other
+                    merged_figures.pop(i)
+                    changed = True
+        merged_figures.append(merged)
+    figures = merged_figures
+
+    # Raw font boxes in some PDFs are twice the printed character width. An
+    # adjoining bitmap (e.g. a star after 合资, or △货 after 改为) can therefore
+    # contain the *box centre* of an unrelated character. Text traces give the
+    # actual advance and baseline. Use those to locate source ink, and never
+    # consume a neighbouring word merely to insert a picture into the flow.
+    symbol_centres, ink_boxes = {}, {}
+    if symbols or any(character in '○◯〇△▽□◇' for character in display):
+        for span in page.get_texttrace():
+            if abs(span['dir'][1]) > .02 or span['dir'][0] < .99:
+                continue
+            for code, _, origin, bbox in span['chars']:
+                value = norm(chr(code)) if code >= 0 else ''
+                if len(value) != 1:
+                    continue
+                glyph = pymupdf.Rect(bbox)
+                x, y = round(origin[0]), round(origin[1])
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for offset, source_origin in glyph_origins.get((x + dx, y + dy, value), []):
+                            if max(abs(a - b) for a, b in zip(source_origin, origin)) > .06:
+                                continue
+                            em = min(span['size'], glyph.width) if re.match(r'[\u4e00-\u9fff○◯〇△▽□◇]', value) else span['size']
+                            symbol_centres[offset] = (glyph.x0 + glyph.width / 2, origin[1] - em * .38)
+                            ink_boxes[offset] = pymupdf.Rect(glyph.x0, origin[1] - em * .88, glyph.x1, origin[1] + em * .2)
+    for i, character in enumerate(display):
+        if character not in '○◯〇△▽□◇' or i not in ink_boxes:
+            continue
+        frame = ink_boxes[i]
+        for j, letter in enumerate(display):
+            if i == j or j not in ink_boxes or not re.match(r'[\u4e00-\u9fff]', letter):
+                continue
+            glyph = ink_boxes[j]
+            if (frame.width * .4 <= glyph.width <= frame.width * 1.55
+                    and frame.height * .4 <= glyph.height <= frame.height * 1.55
+                    and abs((frame.x0 + frame.x1 - glyph.x0 - glyph.x1) / 2) < min(frame.width, glyph.width) * .42
+                    and abs((frame.y0 + frame.y1 - glyph.y0 - glyph.y1) / 2) < max(frame.height, glyph.height) * .38
+                    and not (frame & glyph).is_empty):
+                # Ink estimates establish identity, not crop boundaries: a
+                # triangle's apex may extend above the estimated square em.
+                # Original boxes are a fallback. Independent vector paths below
+                # provide exact bounds even when a font under-reports its width.
+                clip = coordinates[i] | coordinates[j]
+                if not clip.is_empty:
+                    composites.append((clip, sorted([i, j])))
+    vector_glyphs = None
+    def vector_symbol(offsets, rect):
+        nonlocal vector_glyphs
+        if vector_glyphs is None:
+            vector_glyphs = collections.defaultdict(list)
+            try:
+                root = ET.fromstring(page.get_svg_image(text_as_path=True))
+            except (ET.ParseError, RuntimeError, ValueError):
+                return None
+            definitions = {node.get('id'): node for node in root.iter() if node.get('id')}
+            for node in root.iter('{http://www.w3.org/2000/svg}use'):
+                value = norm(node.get('data-text', ''))
+                matrix = re.fullmatch(r'matrix\(([^)]+)\)', node.get('transform', ''))
+                target = definitions.get(node.get('{http://www.w3.org/1999/xlink}href', '').removeprefix('#'))
+                if len(value) != 1 or matrix is None or target is None or target.tag != '{http://www.w3.org/2000/svg}path':
+                    continue
+                numbers = [float(number) for number in re.split(r'[,\s]+', matrix[1].strip())]
+                if len(numbers) != 6:
+                    continue
+                ox, oy = numbers[4:]
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for offset, origin in glyph_origins.get((round(ox) + dx, round(oy) + dy, value), []):
+                            if abs(origin[0] - ox) > .06 or abs(origin[1] - oy) > .06:
+                                continue
+                            attributes = {key: val for key, val in target.attrib.items() if key != 'id'}
+                            attributes.update({key: val for key, val in node.attrib.items() if key in
+                                               ['transform', 'fill', 'fill-opacity', 'stroke', 'stroke-width', 'opacity']})
+                            vector_glyphs[offset].append(ET.Element('path', attributes))
+        if any(offset not in vector_glyphs for offset in offsets):
+            return None
+        root = ET.Element('svg', {'xmlns': 'http://www.w3.org/2000/svg',
+                                 'width': str(bounds.width), 'height': str(bounds.height),
+                                 'viewBox': f'0 0 {bounds.width} {bounds.height}'})
+        for offset in offsets:
+            root.extend(vector_glyphs[offset])
+        # A paint operation can contain several text spans, so even bboxlog's
+        # seqno bounds can include an entire row. Measure only these paths;
+        # neither neighbouring letters nor table strokes enter this SVG.
+        try:
+            with pymupdf.open(stream=ET.tostring(root), filetype='svg') as vector:
+                pdf_bytes = vector.convert_to_pdf()
+            with pymupdf.open(stream=pdf_bytes, filetype='pdf') as vector:
+                paths = vector[0].get_drawings()
+            if paths:
+                rect = pymupdf.Rect(paths[0]['rect'])
+                for drawing in paths[1:]:
+                    rect |= drawing['rect']
+                rect = pymupdf.Rect(rect.x0 - .6, rect.y0 - .6, rect.x1 + .6, rect.y1 + .6) & bounds
+        except (RuntimeError, ValueError):
+            pass
+        if rect.is_empty:
+            return None
+        root.set('viewBox', ' '.join(f'{value:.4f}' for value in [rect.x0, rect.y0, rect.width, rect.height]))
+        root.set('width', f'{rect.width:.4f}')
+        root.set('height', f'{rect.height:.4f}')
+        return ET.tostring(root, encoding='unicode', short_empty_elements=True), rect
+
+    regions = []
+    def add(kind, rect, offsets=None, vector=False):
+        if rect.is_empty or rect.width < .2 or rect.height < .2:
+            return
+        if offsets is not None:
+            offsets = sorted({offset for offset in offsets if isinstance(offset, int) and
+                              0 <= offset < min(len(coordinates), len(display))})
+        content_rect = pymupdf.Rect(rect)
+        rect = pymupdf.Rect(rect.x0 - .6, rect.y0 - .6, rect.x1 + .6, rect.y1 + .6) & bounds
+        if offsets is not None:
+            selected = offsets
+        elif kind == 'symbol':
+            selected = [i for i, (x, y) in symbol_centres.items() if
+                        content_rect.x0 <= x <= content_rect.x1 and content_rect.y0 <= y <= content_rect.y1
+                        and (content_rect & ink_boxes[i]).get_area() >= ink_boxes[i].get_area() * .65]
+        else:
+            selected = [i for i, box in enumerate(coordinates) if
+                        rect.x0 <= (box.x0 + box.x1) / 2 <= rect.x1 and
+                        rect.y0 <= (box.y0 + box.y1) / 2 <= rect.y1]
+        if selected:
+            a, b = min(selected), max(selected) + 1
+        else:
+            middle = (rect.y0 + rect.y1) / 2
+            near = min(data['lines'], key=lambda line: abs((line['y'] + line['bottom']) / 2 - middle), default=None)
+            if kind == 'symbol' and near:
+                right_offsets = [i for i in range(near['a'], min(near['b'], len(coordinates))) if coordinates[i].x0 >= rect.x1 - 1]
+                a = min(right_offsets) if right_offsets else min(near['b'], len(coordinates), len(display))
+            else:
+                before = [line for line in data['lines'] if line['bottom'] <= rect.y0 + 2]
+                a = max(before, key=lambda line: line['bottom'])['b'] if before else 0
+            b = a
+        limit = min(len(coordinates), len(display))
+        a, b = max(0, min(a, limit)), max(0, min(b, limit))
+        b = max(a, b)
+        record = dict(kind=kind, rect=[round(value, 2) for value in rect], a=a, b=b)
+        if vector and (shape := vector_symbol(selected, rect)):
+            record['svg'], ink = shape
+            record['rect'] = [round(value, 2) for value in ink]
+        if kind == 'symbol' and len(selected) > 1:
+            record['offsets'] = sorted(set(selected))
+        if kind == 'layout':
+            record['textReliable'] = False
+        if record not in regions:
+            regions.append(record)
+
+    for rect in figures:
+        # Labels immediately adjoining vector strokes are part of the figure.
+        if not any(rect == image for image in images):
+            original = pymupdf.Rect(rect)
+            for line in data['lines']:
+                center = (line['y'] + line['bottom']) / 2
+                if (original.y0 - 7 <= center <= original.y1 + 7 and
+                        line['right'] >= original.x0 - 3 and line['x'] <= original.x1 + 3):
+                    rect |= pymupdf.Rect(line['x'], line['y'], line['right'], line['bottom'])
+        add('layout' if any(not (rect & encoded).is_empty for encoded in encoded_regions) else 'figure', rect)
+    for rect in symbols:
+        if not any(rect in figure for figure in figures):
+            inside = [i for i, (x, y) in symbol_centres.items() if
+                      rect.x0 <= x <= rect.x1 and rect.y0 <= y <= rect.y1 and re.match(r'[\u4e00-\u9fff]', display[i])]
+            widths = sorted(ink_boxes[i].width for i in inside)
+            complex_header = (len(inside) >= 2 and rect in diagonal_shapes and
+                              max(rect.width, rect.height) > widths[len(widths) // 2] * 1.8)
+            if complex_header:
+                clip = pymupdf.Rect(rect)
+                for offset in inside:
+                    clip |= coordinates[offset]
+                add('figure', clip)
+            else:
+                add('symbol', rect)
+    for rect, offset in text_symbols:
+        if not any(rect in figure for figure in figures):
+            add('symbol', rect, [offset])
+    for rect, offsets in composites:
+        if not any(rect in figure for figure in figures):
+            add('symbol', rect, offsets, vector=True)
+    for rect, offset in bad_glyph_boxes:
+        if any(rect in figure for figure in figures):
+            continue
+        # Malformed symbol fonts can report a glyph box twice its ink height.
+        # Crop the ink itself so an adjacent table rule cannot become part of
+        # the inline glyph. Source text offsets still refer to the original box.
+        scale = 4
+        pixmap = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), clip=rect, alpha=False)
+        if pixmap.width and pixmap.height:
+            ink = Image.frombytes('RGB', (pixmap.width, pixmap.height), pixmap.samples).convert('L').point(lambda value: 255 if value < 160 else 0)
+            for y in range(ink.height):
+                row = ink.crop((0, y, ink.width, y + 1))
+                if sum(row.getdata()) >= ink.width * 255 * .8:
+                    ink.paste(0, (0, max(0, y - 1), ink.width, min(ink.height, y + 2)))
+            if bbox := ink.getbbox():
+                rect = pymupdf.Rect((pixmap.x + bbox[0]) / scale, (pixmap.y + bbox[1]) / scale,
+                                    (pixmap.x + bbox[2]) / scale, (pixmap.y + bbox[3]) / scale)
+        add('symbol', rect, [offset])
+    # Expanding to adjoining labels can make two previously disjoint vector
+    # regions overlap. Emit one crop for that area, never duplicate source ink.
+    merged_regions = []
+    for region in [region for region in regions if region['kind'] != 'symbol']:
+        rect = pymupdf.Rect(region['rect'])
+        changed = True
+        while changed:
+            changed = False
+            for i in range(len(merged_regions) - 1, -1, -1):
+                other = merged_regions[i]
+                if not (rect & pymupdf.Rect(other['rect'])).is_empty:
+                    rect |= pymupdf.Rect(other['rect'])
+                    region['a'] = min(region['a'], other['a'])
+                    region['b'] = max(region['b'], other['b'])
+                    if other['kind'] == 'layout':
+                        region['kind'] = 'layout'
+                        region['textReliable'] = False
+                    merged_regions.pop(i)
+                    changed = True
+        region['rect'] = [round(value, 2) for value in rect]
+        merged_regions.append(region)
+    regions = merged_regions + [region for region in regions if region['kind'] == 'symbol' and
+                               not any(pymupdf.Rect(region['rect']) in pymupdf.Rect(other['rect'])
+                                       for other in merged_regions)]
+    regions.sort(key=lambda region: (region['rect'][1], region['rect'][0], region['kind']))
+    return False, regions
+
+
 def render_document(source, output, layout=None):
     """Build selectable text, rules, coordinates and original-page images."""
     source, output = Path(source), Path(output)
     if layout is None:
         layout = extract_document(source, output)
     folder = output / 'data' / layout['id']
-    spec = dict(digest=layout['digest'], format='html-text-8', pages=len(layout['pages']))
+    spec = dict(digest=layout['digest'], format='html-text-18', pages=len(layout['pages']))
     manifest = folder / 'html.json'
     saved = json.loads(manifest.read_text()) if manifest.exists() else {}
     same_render = all(saved.get(key) == value for key, value in spec.items())
@@ -1036,6 +1608,34 @@ def render_document(source, output, layout=None):
             write_page_asset(path, key, coords, markup)
         atomic_text(manifest, json.dumps(dict(spec, mediaPages=sorted(media_pages))))
         return source.name, len(paths), round(time.monotonic() - started, 1)
+    if (complete and saved.get('format') in ['html-text-12', 'html-text-13', 'html-text-14', 'html-text-15', 'html-text-16', 'html-text-17']
+            and saved.get('digest') == spec['digest'] and saved.get('pages') == spec['pages']):
+        # These versions only tighten symbol/text identity. Pages without a
+        # symbol region, their text/rules and all original rasters are unchanged.
+        changed = 0
+        with pymupdf.open(source) as pdf:
+            for i, path in enumerate(paths):
+                key = f'{layout["id"]}:{i}'
+                coords, markup = read_page_asset(path, key)
+                attribute = re.search(r' data-regions="([^"]*)"', markup)
+                if not attribute or not any(region['kind'] == 'symbol' for region in
+                        json.loads(html.unescape(attribute[1]))):
+                    continue
+                page, data = pdf[i], layout['pages'][i]
+                display = data.get('display')
+                if display is None:
+                    display = readpage(page)[0]['display']
+                if display.lower() != data['t']:
+                    display = data['t']
+                _, regions = reading_media_regions(page, data, page.get_drawings(), json.loads(coords), display)
+                replacement = (' data-regions="' + html.escape(json.dumps(regions, ensure_ascii=False,
+                    separators=(',', ':')), quote=True) + '"') if regions else ''
+                updated = markup[:attribute.start()] + replacement + markup[attribute.end():]
+                if updated != markup:
+                    write_page_asset(path, key, coords, updated)
+                    changed += 1
+        atomic_text(manifest, json.dumps(dict(spec, mediaPages=saved.get('mediaPages', []))))
+        return source.name, changed, round(time.monotonic() - started, 1)
     rendered=0
     with pymupdf.open(source) as pdf:
         for i, page in enumerate(pdf):
@@ -1062,20 +1662,15 @@ def render_document(source, output, layout=None):
             boxes = json.loads(coordinate_json)
             elements = []
             drawings = page.get_drawings() if not page.rotation else []
-            source_only = (data['uncertain'] or not data['t'] or bool(page.get_image_info())
-                           or '\ufffd' in display or bool(re.search(r'([\ue000-\uf8ff])\1{5,}', display))
-                           or any(kind == 'fill-shade' for kind, _ in page.get_bboxlog()))
+            source_only, source_regions = reading_media_regions(page, data, drawings, boxes, display)
             for drawing in drawings:
                 commands = []
                 for item in drawing['items']:
                     if item[0] == 'l':
                         a,b = item[1:3]
-                        source_only |= min(abs(a.x - b.x), abs(a.y - b.y)) > .6
                         commands.append(f'M{a.x:.2f},{a.y:.2f}L{b.x:.2f},{b.y:.2f}')
                     elif item[0] == 're':
                         r=item[1]; commands.append(f'M{r.x0:.2f},{r.y0:.2f}h{r.width:.2f}v{r.height:.2f}h{-r.width:.2f}Z')
-                    else:
-                        source_only = True
                 if commands:
                     elements.append('<path d="'+''.join(commands)+'" fill="none" stroke="#555" stroke-width="'+str(max(.2,drawing.get('width') or .3))+'"/>')
             styles = iter(data['styles'])
@@ -1106,6 +1701,8 @@ def render_document(source, output, layout=None):
                     underline = ' text-decoration="underline"' if style & 2 else ''
                     elements.append(f'<text x="{x}" y="{y}" data-line="{line["a"]}" textLength="{max(.1,width)}" font-size="{size}" font-weight="{weight}"{underline}>'+html.escape(value)+'</text>\n')
             fallback = ' data-source="true"' if source_only else ''
+            if source_regions:
+                fallback += ' data-regions="' + html.escape(json.dumps(source_regions, ensure_ascii=False, separators=(',', ':')), quote=True) + '"'
             svg=f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {data["w"]} {data["h"]}" class="text-page"{fallback}>'+''.join(elements)+'</svg>'
             if source_only:
                 media_pages.add(i)

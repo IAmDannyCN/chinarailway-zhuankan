@@ -11,6 +11,7 @@ function startsReadingParagraph(text) {
 }
 
 function readingFurniture(run, height) {
+  if(run.furniture!=null)return run.furniture;
   return (run.y < height * .11 || run.y > height * .94) && /^[\d.·□、()（）—\-\s]+$/.test(run.text);
 }
 
@@ -26,22 +27,50 @@ function articleBlocks(runs, rules, width, height, part, title) {
     if (readingFurniture(run, height)) continue;
     if(!part.strict && /^[\ue000-\uf8ff~]+$/.test(run.text)) continue;
     let row=rows.at(-1);
-    if(!row || (part.strict && run.line != null ? row.line !== run.line :
-        Math.abs(row.y-run.y)>Math.max(run.size,row.size)*.85)) {
+    const rowGap=row ? Math.abs(row.runs.at(-1).y-run.y) : 0;
+    const boldHeading=row && run.bold && startsReadingParagraph(run.text) && row.runs.some(item=>!item.bold);
+    const returnedLeft=row && run.x < row.runs.at(-1).x - .5;
+    const captionAnnotation=row && !run.bold && row.runs.every(item=>item.bold) && run.x>width*.48 &&
+      tables.some(table=>table.top>run.y && table.top-run.y<Math.max(run.size*5,35));
+    // A PDF extraction line can contain several physical baselines, especially
+    // a short final prose line followed by an indented bold heading.
+    if(!row || (part.strict && run.line != null && row.line !== run.line &&
+        (rowGap>Math.max(1.5,Math.min(run.size,row.size)*.3) || returnedLeft)) ||
+        rowGap>Math.max(run.size,row.size)*.85 ||
+        rowGap>Math.min(run.size,row.size)*.55 && (boldHeading || returnedLeft || captionAnnotation)) {
       row={y:run.y,size:run.size,line:run.line,runs:[]};rows.push(row);
     }
     row.runs.push(run);row.size=Math.max(row.size,run.size);
   }
+  // A centered table caption and its right-hand route/unit annotation can be
+  // extracted as one line. Keep their roles separate instead of calling it columns.
+  for(let i=rows.length-1;i>=0;i--) {
+    const row=rows[i],groups=[[]];
+    for(const run of row.runs) {
+      const previous=groups.at(-1).at(-1);
+      if(previous && run.x-previous.x-previous.width>Math.max(run.size*2.8,width*.065)) groups.push([]);
+      groups.at(-1).push(run);
+    }
+    if(groups.length!==2) continue;
+    const [left,right]=groups;
+    const first=left[0],last=left.at(-1),label=left.map(run=>run.text).join('');
+    const annotation=right.map(run=>run.text).join('');
+    const table=tables.find(table=>table.top>row.y && table.top-row.y<Math.max(row.size*5,35));
+    const centered=Math.abs((first.x+last.x+last.width)/2-width/2)<width*.18;
+    if(!table || !centered || right[0].x<width*.55 || label.length>55 || annotation.length>65 ||
+        !(/(?:表|线|路|段|站)$/.test(label) || /^单位[:：]/.test(annotation))) continue;
+    rows.splice(i,1,...groups.map((runs,index)=>({...row,runs,tableCaption:true,role:index?'annotation':'heading'})));
+  }
   const blocks=[];
   const headingKey = value => value.normalize('NFKC').toLowerCase().replace(/[\s：:]/g, '');
-  const titleKey = headingKey(title);
+  const titleKey = headingKey(title.split(/[|｜]/)[0]);
   const firstRows = rows.filter(row => row.runs[0].a < part.a + 260).slice(0, 12);
   const suppressed = new Set();
   for (let i = 0; titleKey && i < firstRows.length; i++) {
     let key = '';
     for (let j = i; j < Math.min(firstRows.length, i + 5); j++) {
       const value = headingKey(firstRows[j].runs.map(r => r.text).join(''));
-      key += j === i ? value.replace(/^(?:附件|附表|附图|附录)[一二三四五六七八九十\d]+/, '') : value;
+      key += j === i ? value.replace(/^(?:附件|附表|附图|附录)[一二三四五六七八九十员圆猿源缘远苑愿怨\d]+/, '') : value;
       if (key === titleKey) {
         firstRows.slice(i, j + 1).forEach(row => suppressed.add(row));
         break;
@@ -69,8 +98,16 @@ function articleBlocks(runs, rules, width, height, part, title) {
     if (part.strict && suppressed.has(row)) {
       const titleRows = [...suppressed];
       if (row === titleRows[0]) {
-        blocks.push({type: 'document-title', centered: true, runs: titleRows.flatMap(row => row.runs)});
+        const annotations=titleRows.filter((row,index)=>row.role==='annotation' || index>0 &&
+          row.x>width*.48 && (row.x+row.right)/2>width*.64 && row.runs.map(run=>run.text).join('').length<60);
+        blocks.push({type: 'document-title', centered: true, tableCaption:annotations.length>0,
+          runs:titleRows.filter(row=>!annotations.includes(row)).flatMap(row=>row.runs)});
+        for(const annotation of annotations)blocks.push({type:'annotation',tableCaption:true,runs:annotation.runs});
       }
+      continue;
+    }
+    if(row.tableCaption) {
+      blocks.push({type:row.role,centered:row.role==='heading',tableCaption:true,runs:row.runs});
       continue;
     }
     if (/^[（(]?(?:续上表|续表|接上表)[）)]?[:：]?$/.test(content)) {
@@ -103,7 +140,7 @@ function articleBlocks(runs, rules, width, height, part, title) {
     if(!part.strict && (content===title || (content.length>5 && title.includes(content) && row.runs[0].a<part.a+180))) continue;
     if (!part.strict && title && content.endsWith(title) && row.runs[0].a < part.a + 180 &&
         /^(?:附件|附表|附图|附录).{0,8}[:：]$/.test(content.slice(0, -title.length))) continue;
-    if(/^(附件|附表|附录)[一二三四五六七八九十\d]*[:：]?$/.test(content)) continue;
+    if(/^(附件|附表|附录)[一二三四五六七八九十员圆猿源缘远苑愿怨\d]*[:：]?$/.test(content)) continue;
     if(/^[\u4e00-\u9fff]{0,15}[〔(\[]\d{2,4}[〕)\]][\u4e00-\u9fff]{0,8}\d+号$/.test(content) || /^[一二三四五六七八九十〇○零\d]{4}年.{1,18}日$/.test(content)){blocks.push({type:'metadata',alignedRight:row.x>width*.44,runs:row.runs});continue;}
     const x = row.runs[0].x, lastRun = row.runs.at(-1);
     const right = lastRun.x + (lastRun.width || lastRun.size * lastRun.text.length);
@@ -129,7 +166,9 @@ function articleBlocks(runs, rules, width, height, part, title) {
         last.lastRow = row;
         last.openEnd = row.right >= rightMargin - row.size * 1.5;
       } else {
-        blocks.push({type: 'paragraph', indent, note: /^注[:：]/.test(content), continued: !starts, lastRow: row,
+        blocks.push({type: 'paragraph', indent,
+          note: /^(?:注|说明)[:：]/.test(content) || !!last?.note && /^\d{1,3}[.、\ue010](?!\d)/.test(content),
+          continued: !starts, lastRow: row,
           openEnd: row.right >= rightMargin - row.size * 1.5, runs: row.runs});
       }
       continue;
@@ -170,9 +209,40 @@ function readingRules(paths) {
 }
 
 function splitReadingColumns(runs, paths, coordinates, width, height) {
-  if (!coordinates.length || !paths.length) return runs;
   const verticals = readingRules(paths).filter(rule => !rule.h);
+  const bands=new Map();
+  for(const [index,run] of runs.entries()) {
+    const key=run.line??'run-'+index;
+    if(!bands.has(key))bands.set(key,[]);
+    bands.get(key).push(run);
+  }
+  for(const band of bands.values()) {
+    const text=band.map(run=>run.text).join('');
+    const size=Math.max(...band.map(run=>run.size));
+    const edge=band.every(run=>run.y<height*.11+size*.85) && Math.min(...band.map(run=>run.y))<height*.11 ||
+      band.every(run=>run.y>height*.9);
+    const grid=band.some(run=>verticals.some(rule=>rule.a<=run.y && rule.b>=run.y));
+    const headerText=text.replace(/仅供参考/g,'').replace(/灡/g,'.');
+    const furniture=edge && !grid && /^[\d.·□、()（）—\-~\s\ue000-\uf8ff]+$/.test(headerText);
+    band.forEach(run=>run.furniture=furniture);
+  }
+  if (!coordinates.length || !paths.length) return runs;
+  const centered = run => {
+    // SVG y is synthesized from font bounding boxes, whose ascent/descent can
+    // differ by more than a full row in tightly ruled older tables. The source
+    // glyph rectangles, rather than that pseudo-baseline, locate the cell.
+    const ys = coordinates.slice(run.a, run.b).filter(box => box && box.every(Number.isFinite))
+      .map(box => (box[1] + box[3] / 2) * height / 100).sort((a,b) => a-b);
+    return ys.length ? {...run, tableY: ys[Math.floor(ys.length / 2)]} : run;
+  };
   return runs.flatMap(run => {
+    run = centered(run);
+    const last=coordinates[run.b-1];
+    // Punctuation in some embedded fonts has a full-em bounding box but a
+    // half-em advance. Its overhang is not text in the adjoining cell.
+    if(last && /[,.，。;；:：!?！？、)）\]〕]$/.test(run.text)) {
+      run={...run,inkRight:(last[0]+Math.min(last[2],run.size*.5/width*100))*width/100};
+    }
     const boundaries = [...new Set(verticals.filter(rule => rule.a <= run.y && rule.b >= run.y - run.size * .5 &&
       rule.v > run.x + 1 && rule.v < run.x + run.width - 1).map(rule => rule.v))].sort((a,b) => a-b);
     if (!boundaries.length || run.text.length < 2) return [run];
@@ -187,8 +257,8 @@ function splitReadingColumns(runs, paths, coordinates, width, height) {
     }
     return groups.map(({start,end}) => {
       const first = coordinates[run.a + start], last = coordinates[run.a + end - 1];
-      return {...run,a:run.a+start,b:run.a+end,text:run.text.slice(start,end),x:first[0]*width/100,
-        width:(last[0]+last[2]-first[0])*width/100};
+      return centered({...run,inkRight:end===run.text.length?run.inkRight:undefined,a:run.a+start,b:run.a+end,text:run.text.slice(start,end),x:first[0]*width/100,
+        width:(last[0]+last[2]-first[0])*width/100});
     });
   });
 }
@@ -209,7 +279,12 @@ function verifyReadingUnderlines(runs, paths) {
     run.fraction = !!stroke && runs.some(other => other.line !== run.line &&
       other.y > stroke.v + run.size * .45 && other.y <= stroke.v + run.size * 1.25 &&
       other.x >= stroke.a - 1 && other.x + other.width <= stroke.b + 1 &&
-      Math.abs(other.x + other.width / 2 - (stroke.a + stroke.b) / 2) <= run.size * .4);
+      Math.abs(other.x + other.width / 2 - (stroke.a + stroke.b) / 2) <= run.size * .4 &&
+      // Text in the next ruled row is not a denominator. Inflated font metrics
+      // in older PDFs otherwise turn underlined station names into fractions.
+      !lines.some(rule => rule.h && rule !== stroke &&
+        rule.v > stroke.v + .6 && rule.v < other.y - .6 &&
+        rule.a <= (run.x + run.width / 2) && rule.b >= (run.x + run.width / 2)));
     run.underline = !!stroke && !run.fraction;
   }
 }
@@ -223,15 +298,18 @@ function canDisplayReadingPart(blocks, decoded, part) {
   const gutters = [];
   const tables = blocks.filter(block => block.type === 'table');
   const inTable = new Set(tables.flatMap(table => table.runs.map(run => run.a)));
+  const captions=new Set(blocks.filter(block=>block.tableCaption || block.type==='annotation').flatMap(block=>block.runs.map(run=>run.a)));
   for (const run of selected) {
     if (run.b > part.b || run.fraction || !Number.isFinite(run.width) || !Number.isFinite(run.y)) return false;
-    if (inTable.has(run.a)) continue;
+    if (inTable.has(run.a) || captions.has(run.a)) continue;
     const band = bands.get(run.line) || [];
     const previous = band.at(-1);
     const gap = previous ? run.x - previous.x - previous.width : 0;
+    const listGap=gap>0 && /^\d{1,3}(?:[.．]\d{1,3}){1,4}[.．、]?$|^\d{1,3}[.．、]$/.test(band.map(run=>run.text).join('')) &&
+      /^[\u4e00-\u9fff]/.test(run.text) && gap<=Math.max(run.size*4,width*.09);
     if (previous && (run.x < previous.x - .5 || gap < -Math.max(run.size, previous.size) * 1.1 ||
-        gap > Math.max(run.size * 2.8, width * .065))) return false;
-    if (gap >= Math.max(3, run.size * 1.05)) {
+        !listGap && gap > Math.max(run.size * 2.8, width * .065))) return false;
+    if (!listGap && gap >= Math.max(3, run.size * 1.05)) {
       const center = run.x - gap / 2;
       const gutter = gutters.find(item => Math.abs(item.center - center) <= 2);
       if (gutter) gutter.lines.add(run.line);
@@ -266,7 +344,49 @@ function canDisplayReadingPart(blocks, decoded, part) {
   });
 }
 
+function tablePhysicalLines(runs) {
+  // Font-size/bounding-box height is unreliable in several embedded Chinese
+  // fonts. Establish baselines with the actual CJK ink positions first, then
+  // attach punctuation/digits using source order as well as geometry.
+  const ordered=runs.slice().sort((a,b)=>a.a-b.a),lines=[];
+  const cjk=run=>/[\u3400-\u9fff\uf900-\ufaff]/.test(run.text);
+  const add=(line,run)=>{line.runs.push(run);line.size=Math.max(line.size,run.size);};
+  for(const run of ordered.filter(cjk)) {
+    let line=lines.find(line=>{
+      const previous=line.runs.at(-1);
+      return previous && run.line!=null && previous.line===run.line && run.x>previous.x+.5 &&
+        Math.abs(run.y-line.y)<=Math.max(run.size,line.size)*.52;
+    });
+    if(!line)line=lines.find(line=>Math.abs(run.y-line.y)<=Math.max(1.3,Math.min(run.size,line.size)*.32));
+    if(!line){line={y:run.y,size:run.size,runs:[]};lines.push(line);}
+    add(line,run);
+  }
+  for(const line of lines) {
+    const ys=line.runs.map(run=>run.y).sort((a,b)=>a-b);
+    line.y=ys[Math.floor(ys.length/2)];
+  }
+  for(const run of ordered.filter(run=>!cjk(run))) {
+    const same=lines.filter(line=>line.runs.some(item=>item.line!=null && item.line===run.line) &&
+      Math.abs(line.y-run.y)<=Math.max(line.size,run.size)*.9);
+    let line=same.sort((a,b)=>{
+      const distance=line=>Math.min(...line.runs.map(item=>Math.max(0,item.a-run.b,run.a-item.b)));
+      return distance(a)-distance(b) || Math.abs(a.y-run.y)-Math.abs(b.y-run.y);
+    })[0];
+    if(!line)line=lines.find(line=>Math.abs(run.y-line.y)<=Math.max(1.3,Math.min(run.size,line.size)*.32));
+    if(!line){line={y:run.y,size:run.size,runs:[]};lines.push(line);}
+    add(line,run);
+  }
+  lines.sort((a,b)=>a.y-b.y);
+  for(const line of lines) {
+    line.runs.sort((a,b)=>a.x-b.x || a.a-b.a);
+    const centers=line.runs.map(run=>run.tableY ?? run.y-run.size*.3).sort((a,b)=>a-b);
+    line.sourceY=centers[Math.floor(centers.length/2)];
+  }
+  return lines;
+}
+
 function tableRegions(runs, paths, pageWidth, strict = false) {
+  const anchorY = run => run.tableY ?? run.y - run.size * .3;
   const lines = readingRules(paths);
   const parent=lines.map((_,i)=>i),find=i=>parent[i]===i?i:(parent[i]=find(parent[i]));
   const join=(a,b)=>{parent[find(a)]=find(b);};
@@ -312,7 +432,7 @@ function tableRegions(runs, paths, pageWidth, strict = false) {
       bottom = openEnd;
       ys.push(bottom);
     }
-    const inside=runs.filter(r=>r.x>=left-1 && r.x<right && r.y-r.size*.3>=top && r.y-r.size*.3<bottom);
+    const inside=runs.filter(r=>r.x>=left-1 && r.x<right && anchorY(r)>=top && anchorY(r)<bottom);
     if(!inside.length)continue;
     const columns=xs.length-1,rowCount=ys.length-1;
     // Excessively fragmented drawings are retained geometrically instead of guessed as cells.
@@ -344,22 +464,16 @@ function tableRegions(runs, paths, pageWidth, strict = false) {
     let crossesRule = false;
     for(const run of inside){
       const col=Math.max(0,Math.min(columns-1,xs.findIndex(x=>x>run.x+1)-1));
-      const row=Math.max(0,Math.min(rowCount-1,ys.findIndex(y=>y>run.y-run.size*.3)-1));
+      const row=Math.max(0,Math.min(rowCount-1,ys.findIndex(y=>y>anchorY(run))-1));
       const cell = merged.get(root(row*columns+col));
       const tolerance = Math.max(1.5,run.size * .7);
-      crossesRule ||= run.x < xs[cell.c0] - tolerance || run.x + run.width > xs[cell.c1 + 1] + tolerance;
+      crossesRule ||= run.x < xs[cell.c0] - tolerance || (run.inkRight ?? run.x + run.width) > xs[cell.c1 + 1] + tolerance;
       cell.runs.push(run);
     }
     if (strict && crossesRule) { fallback('text-crosses-cells'); continue; }
     const rows=Array.from({length:rowCount},()=>[]);
     for(const cell of merged.values()){
-      cell.lines=[];
-      for(const run of cell.runs.slice().sort((a,b)=>a.y-b.y||a.x-b.x)){
-        let line=cell.lines.at(-1);
-        if(!line || Math.abs(run.y-line.y)>Math.max(run.size,line.size)*.85){line={y:run.y,size:run.size,runs:[]};cell.lines.push(line);}
-        line.runs.push(run);
-      }
-      for(const line of cell.lines)line.runs.sort((a,b)=>a.x-b.x);
+      cell.lines=tablePhysicalLines(cell.runs);
       rows[cell.r0].push(cell);
     }
     rows.forEach(row=>row.sort((a,b)=>a.c0-b.c0));
@@ -372,11 +486,13 @@ function tableRegions(runs, paths, pageWidth, strict = false) {
     ).length >= 2);
     const hasStackedTimes = strict && rows.some(row => row.some(cell =>
       cell.lines.filter(line => /^\d{1,2}[:：.]\d{2}$/.test(line.runs.map(run => run.text).join(''))).length >= 2));
-    if (hasUnruledRows || hasStackedTimes) {
-      fallback(hasStackedTimes ? 'unruled-times' : 'unruled-rows');
+    const table={type:'table',rows,xs,ys,left,right,top,bottom,runs:inside,columns,rules};
+    const records=tableRecordBands(table);
+    if (hasStackedTimes || records.unsafe || hasUnruledRows && !records.handled) {
+      fallback(hasStackedTimes ? 'unruled-times' : records.unsafe ? 'unruled-records' : 'unruled-rows');
       continue;
     }
-    tables.push({type:'table',rows,xs,ys,left,right,top,bottom,runs:inside,columns,rules});
+    tables.push(table);
   }
   return tables.sort((a,b)=>a.top-b.top||a.left-b.left);
 }
@@ -389,19 +505,109 @@ function tableCellText(cell) {
   return tableCellRuns(cell).map(run => run.text).join('').normalize('NFKC').replace(/\s+/g, '');
 }
 
-const stationTableLabel = /^(?:(?:始发|出发|到达|经由|办理|交接|货运|客运)站(?:名|名称)?|站名(?:称)?|车站(?:名|名称)?|发站|到站|起点站|终点站)$/;
+function tableRecordBands(table) {
+  const profile=tableProfile(table),cells=table.rows.flat();
+  let handled=false,unsafe=false;
+  const text=line=>line.runs.map(run=>run.text).join('').normalize('NFKC').replace(/\s+/g,'');
+  const numeric=line=>/^(?:\d+(?:[.．—–-]\d+)?|[—–-])$/.test(text(line));
+  // Missing inner verticals (including a partially masked drawing) can leave
+  // an entire multi-column continuation as one full-width body cell.
+  unsafe=cells.some(cell=>cell.c1>cell.c0 && cell.lines.filter(line=>
+    /^\d{1,4}(?:[—–-]\d{1,4})?[\u3400-\u9fff]/.test(text(line))).length>=3);
+  const denseRecords=row=>row.some(cell=>cell.lines.filter(numeric).length>=3) &&
+    row.filter(cell=>cell.lines.length>=3).length>=2;
+  if(!profile.headerRows)return {handled,unsafe:unsafe || table.rows.some(denseRecords)};
+  for(const row of table.rows) {
+    const body=row.filter(cell=>cell.r0>=profile.headerRows && cell.c0===cell.c1 && cell.lines.length>=2);
+    if(body.length<2)continue;
+    const anchors=body.filter(cell=>cell.r0===cell.r1 && cell.lines.every(numeric) && cell.lines.length>=2)
+      .sort((a,b)=>b.lines.length-a.lines.length);
+    let reference=anchors[0];
+    const categorical=body.find(cell=>cell.r0===cell.r1 && cell.lines.length>=3 &&
+      /^(?:图别|路别|类别)$/.test(profile.labels.get(cells.find(header=>header.c0===cell.c0 && header.c1===cell.c1 && header.r0<profile.headerRows))||'') &&
+      cell.lines.every(line=>text(line).length<=12 && !/[。；，,;]/.test(text(line))));
+    if(!reference)reference=categorical;
+    if(!reference)reference=body.find(cell=>cell.r0===cell.r1 && profile.columns[cell.c0].station &&
+      cell.lines.length>=3 && cell.lines.every(line=>text(line).length<=16));
+    const parallel=body.filter(cell=>cell.lines.length>=3);
+    const recordLike=parallel.length>=3 && ['amendment','mileage'].includes(profile.family) &&
+      parallel.filter(cell=>cell.lines.length>=8).length>=3;
+    if(!reference) {
+      // Several independently populated columns in one tall cell row cannot be
+      // flattened into prose. Preserve this region if row identity is uncertain.
+      if(recordLike || denseRecords(row))unsafe=true;
+      continue;
+    }
+    const positions=reference.lines.map(line=>line.y),count=positions.length;
+    const gap=Math.min(...positions.slice(1).map((y,i)=>y-positions[i]));
+    if(!(gap>2)){unsafe=true;continue;}
+    const indexFor=line=>{
+      const distances=positions.map(y=>Math.abs(y-line.y)),index=distances.indexOf(Math.min(...distances));
+      return distances[index]<=Math.max(1.3,Math.min(gap*.4,line.size*.75))?index:-1;
+    };
+    const exact=body.filter(cell=>cell.r0===reference.r0 && cell.r1===reference.r1 &&
+      cell.lines.length===count && cell.lines.every((line,i)=>indexFor(line)===i));
+    if(exact.length<2 || !exact.some(cell=>cell.lines.some(line=>/[\u4e00-\u9fff]/.test(text(line))))) {
+      if(recordLike || reference===categorical || reference.lines.length>=3 && denseRecords(row))unsafe=true;
+      continue;
+    }
+    const proposals=[];
+    let valid=true;
+    for(const cell of row.filter(cell=>cell.r0===reference.r0 && cell.r1===reference.r1 && cell.c0===cell.c1)) {
+      const column=profile.columns[cell.c0];
+      const category=/局名|局别|省别|区划|企业简称|路局/.test(profile.labels.get(cells.find(header=>header.c0===cell.c0 && header.c1===cell.c1 && header.r0<profile.headerRows))||'');
+      if(category && cell.lines.length<count*.75)continue;
+      if(cell.lines.length===1 && !column.station && column.kind!=='prose')continue;
+      const bands=positions.map((y,i)=>({y,sourceY:reference.lines[i].sourceY,p:reference.lines[i].runs[0]?.p,runs:[]}));
+      for(const line of cell.lines) {
+        const index=indexFor(line);
+        if(index<0){valid=false;break;}
+        bands[index].runs.push(...line.runs);
+      }
+      if(!valid)break;
+      proposals.push([cell,bands]);
+    }
+    if(!valid){unsafe=true;continue;}
+    for(const [cell,bands]of proposals)cell.recordBands=bands;
+    handled=true;table.logicalRows=true;
+  }
+  // A column with no cross-rules may span several genuinely ruled rows.
+  // Repeated per-row content must not collapse into one concatenated value.
+  for(const cell of cells.filter(cell=>cell.r0>=profile.headerRows && cell.r1>cell.r0 && cell.lines.length>=2)) {
+    const rowCount=cell.r1-cell.r0+1;
+    const repeatedValues=cell.lines.every(numeric) && new Set(cell.lines.map(text)).size<cell.lines.length;
+    if(cell.lines.length!==rowCount) {
+      if(repeatedValues && cell.lines.length>rowCount)unsafe=true;
+      continue;
+    }
+    const bands=[];
+    let valid=true;
+    for(let i=0;i<rowCount;i++) {
+      const r=cell.r0+i,top=table.ys[r],bottom=table.ys[r+1],line=cell.lines[i];
+      const center=line.sourceY ?? line.y-line.size*.3;
+      if(center<top-1 || center>bottom+1){valid=false;break;}
+      bands.push({y:line.y,sourceY:line.sourceY,p:line.runs[0]?.p,r0:r,r1:r,runs:line.runs});
+    }
+    if(valid){cell.recordBands=bands;table.logicalRows=true;handled=true;}
+    else if(repeatedValues)unsafe=true;
+  }
+  return {handled,unsafe};
+}
+
+const stationTableLabel = /^(?:(?:始发|出发|到达|经由|办理|交接|货运|客运)站(?:名|名称)?|站|站名(?:称)?|车站(?:名|名称)?|发站|到站|起点站|终点站)$/;
 const descriptiveTableLabel = /接续线名|备注|附注|附记|说明|办理限制|修改内容|办理范围|限制内容|修改前|修改后|原内容|订正后|^原文$|^订正$|^[误正]$/;
 const timeTableLabel = /^(?:到达|出发|开车|通过|发车|终到|停车|停留|运行|开行|办理)(?:时刻|时间)?$|时刻$|^(?:时分|时间|到|开|发)$/;
 const codeTableLabel = /^(?:[\u4e00-\u9fff]{0,14}(?:编号|代码|编码|代号|电报码|电报略码)|车次|车号|品名号|品类号|序号)$/;
 const numericTableLabel = /票价|运价|费率|收费标准|计费标准|金额|费额|小计|合计|单价|运费|数量|人次|人数|对数|吨数|件数|辆数|箱数|票数|收入|支出|补款|重量|定员|载重|速度|里程/;
-const knownTableLabel = /^(?:[\u4e00-\u9fff]{0,14}(?:名称|站名|品名|品类|规格|车型|车种|日期|单位|项目|位置|栏别|页码|页数|区间|线路|线名|区划|局别|局名|简称)|新设|取消|变更|类别|车厢|数量|合计|小计)$/;
+const trainTableLabel = /^(?:担当局|始发局|始发分局|终到局(?:\(省\))?|发到站|批准价格|空调产权|上浮幅度)$/;
+const knownTableLabel = /^(?:[\u4e00-\u9fff]{0,14}(?:名称|站名|品名|品类|规格|车型|车种|日期|单位|项目|位置|栏别|页码|页数|区间|线路|线名|区划|局别|局名|简称)|页|局|省|箱别|图别|路别|新设|取消|变更|类别|车厢|数量|合计|小计)$/;
 
 function tableProfile(table, title = '') {
   const cells = table.rows.flat();
   const labels = new Map(cells.map(cell => [cell, tableCellText(cell)]));
   const recognized = text => !!text && text.length <= 22 && (
     stationTableLabel.test(text) || descriptiveTableLabel.test(text) || timeTableLabel.test(text) ||
-    codeTableLabel.test(text) || numericTableLabel.test(text) || knownTableLabel.test(text));
+    codeTableLabel.test(text) || numericTableLabel.test(text) || knownTableLabel.test(text) || trainTableLabel.test(text));
   const rowKey = row => row.map(cell => labels.get(cell)).filter(Boolean);
   let headerRows = 0;
   for (let i = 0; i < Math.min(4, table.rows.length - 1); i++) {
@@ -428,7 +634,8 @@ function tableProfile(table, title = '') {
       /(?:费率|票价|运价|运费计算)表/.test(subject) && /区间|运价|计费|票种|席别|金额/.test(header)) family = 'fare';
   else if (/车种|车型|轴数|型号|技术标准/.test(header + subject) &&
       keys.filter(key => /轴距|轴重|速度|自重|载重|定员|最大尺寸|制动|供水/.test(key)).length >= 2) family = 'technical';
-  else if (/编组顺序|运行时刻表|列车时刻/.test(subject) && /车次|车种|车型|时刻|开车|顺序|时分/.test(header) ||
+  else if (/车次/.test(header) && /担当局|发到站|批准价格/.test(header) ||
+      /编组顺序|运行时刻表|列车时刻/.test(subject) && /车次|车种|车型|时刻|开车|顺序|时分/.test(header) ||
       /车次/.test(header) && keys.some(key => /^(?:到达|开车|发车|停留|站序|时分)(?:时刻|时间)?$/.test(key))) family = 'train';
   else if (/办理范围|办理限制|专用线名称|专用铁路名称|办理箱型|营业范围/.test(header)) family = 'operation';
   else if (keys.some(key => codeTableLabel.test(key) && !/^(?:序号|车次|车号)$/.test(key)) &&
@@ -492,7 +699,7 @@ function joinTableContinuation(previous, nextBlocks, strict = false) {
     cell.c0, cell.c1, cell.r1 - cell.r0, tableCellText(cell)
   ]));
   const looksLikeHeading = row => row.some(cell =>
-    /站名|车站名称|里程|区划|品名|名称|序号|项目|代码|接续线名|备注|^单位$/.test(tableCellText(cell))
+    /站名|车站名称|里程|区划|品名|名称|序号|项目|代码|接续线名|备注|车次|担当局|发到站|^单位$/.test(tableCellText(cell))
   );
   // A header with merged cells can occupy multiple physical rows.
   const headerRows = strict ? tableProfile(previous, previous.caption).headerRows :
@@ -500,17 +707,27 @@ function joinTableContinuation(previous, nextBlocks, strict = false) {
   const repeated = headerRows > 0 && next.rows.length > headerRows &&
     previous.rows.slice(0, headerRows).every((row, i) =>
       row.every(cell => cell.r1 < headerRows) && rowKey(row) === rowKey(next.rows[i]));
+  // A continuation may repeat only column numbers instead of its full, merged
+  // heading. With an explicit continuation marker and the same known grid,
+  // the exact 1..N numbering row is auxiliary furniture rather than a record.
+  const numberRow = row => row?.length === next.columns && row.every((cell,i)=>
+    cell.c0===i && cell.c1===i && cell.r0===cell.r1 && tableCellText(cell)===String(i+1));
+  const numberedColumns = marker && headerRows > 0 && numberRow(next.rows[0]);
+  const repeatedNumbers = repeated && numberRow(previous.rows[headerRows]) && numberRow(next.rows[headerRows]);
   // A new heading, or a mismatch in a known heading, means a separate table.
-  if (!repeated && (!marker || looksLikeHeading(next.rows[0]))) {
+  if (!repeated && !numberedColumns && (!marker || looksLikeHeading(next.rows[0]))) {
     groupOriginalGrids();
     return;
   }
 
-  const skip = repeated ? headerRows : 0;
+  const skip = repeated ? headerRows + (repeatedNumbers ? 1 : 0) : numberedColumns ? 1 : 0;
   const shift = previous.rows.length - skip;
   const rows = next.rows.slice(skip).map(row => row.map(cell => ({
-    ...cell, r0: cell.r0 + shift, r1: cell.r1 + shift
+    ...cell, r0: cell.r0 + shift, r1: cell.r1 + shift,
+    ...(cell.recordBands ? {recordBands:cell.recordBands.map(band=>band.r0==null?band:
+      {...band,r0:band.r0+shift,r1:band.r1+shift})} : {})
   })));
+  previous.logicalRows ||= next.logicalRows;
   previous.rows.push(...rows);
   previous.runs.push(...rows.flatMap(row => row.flatMap(cell => cell.runs)));
   nextBlocks.splice(0, prefixLength + 1);
