@@ -45,7 +45,35 @@ assert.deepEqual(parameters.map(b => b.type), ['parameters', 'heading', 'paragra
 assert.equal(parameters[0].rows[1].label[0].text, '单个轴重');
 assert.equal(parameters[0].rows[1].value[0].text, '23t');
 assert.equal(parameters[0].rows[1].value[0].a, parameterRuns[1].a + '单个轴重⋯⋯⋯'.length);
+assert.deepEqual(parameters[0].runs,parameterRuns.slice(0,2));
+const framedParameterRuns=parameterRuns.map((run,index)=>({...run,width:160,line:index}));
+const framedFields=articleBlocks(framedParameterRuns,['M10,90h230v45h-230Z'],300,500,{a:0,b:a,strict:true},'');
+assert.equal(framedFields[0].type,'parameters');
+const framedCanDisplay=new Function(fs.readFileSync(__dirname+'/../offline/flow.js','utf8')+';return canDisplayReadingPart')();
+assert(framedCanDisplay(framedFields,{runs:framedParameterRuns,rules:['M10,90h230v45h-230Z'],width:300,height:500},{a:0,b:a,strict:true}));
 console.log('通过：点引线参数逐行对应，编号条款与上方标题分开。');
+
+// An ellipsis quoted inside a regulation amendment is prose, even when the
+// ellipsis and the preceding part of the sentence share a physical PDF line.
+a=0;
+const quotedEllipsis=[
+ {...run('6.有关站名和办理限制见附件。现将本线里程表下附注改为:',40,100),width:240,line:0},
+ {...run('“......滨州北（不含）至沾化属有关公司',20,115),width:260,line:1},
+ {...run('（不含某站），其他规定按原办法办理。”',20,130),width:230,line:2}
+];
+const quotedBlocks=articleBlocks(quotedEllipsis,[],300,500,{a:0,b:a,strict:true},'');
+assert(!quotedBlocks.some(block=>block.type==='parameters'));
+assert.equal(quotedBlocks.length,1);
+assert.equal(quotedBlocks[0].runs.map(run=>run.text).join(''),quotedEllipsis.map(run=>run.text).join(''));
+const inlineQuoted=[{...run('本条文中“如到站......填入”一节予以删除。',20,170),width:250,line:3}];
+assert.equal(articleBlocks(inlineQuoted,[],300,500,{a:inlineQuoted[0].a,b:a,strict:true},'')[0].type,'paragraph');
+const continuedQuoted=[{...run('站为天津收货人却为东北......)已能确定运抵到站找不到收',20,190),width:260,line:4}];
+assert.equal(articleBlocks(continuedQuoted,[],300,500,{a:continuedQuoted[0].a,b:a,strict:true},'')[0].type,'paragraph');
+const textFields=[{...run('材料⋯⋯⋯铸钢',20,220),width:180,line:5},{...run('工艺⋯⋯⋯锻造',20,240),width:180,line:6}];
+const textFieldBlocks=articleBlocks(textFields,[],300,500,{a:textFields[0].a,b:a,strict:true},'');
+assert.equal(textFieldBlocks.length,1);assert.equal(textFieldBlocks[0].type,'parameters');
+assert.equal(textFieldBlocks[0].rows.length,2);
+console.log('通过：修订引文中的省略号保持正文，真正参数块保留完整源文字范围。');
 
 const verifyReadingUnderlines = new Function(
   fs.readFileSync(__dirname + '/../offline/flow.js', 'utf8') + ';return verifyReadingUnderlines;'
@@ -207,6 +235,34 @@ const [symbolOnlyRecords]=tableRegions(emptyNotes,recordRules,250,true);
 assert.deepEqual(symbolOnlyRecords.rows[1][3].recordBands.map(band=>({p:band.p,y:band.sourceY,n:band.runs.length})),[
  {p:0,y:87,n:0},{p:0,y:107,n:0},{p:0,y:127,n:0}
 ]);
+
+// Embedded numbering fonts also use U+E010 as a decimal point. It is a dot for
+// semantic classification, without altering the original text or its offsets.
+a=0;
+const decimalRuns=[{...run('项目',5,60),width:20},{...run('票价',75,60),width:20},{...run('运费',145,60),width:20}];
+for(let i=0;i<3;i++)decimalRuns.push({...run(['甲项目','乙项目','丙项目'][i],5,90+i*20),width:30},
+ {...run('0\ue010184',75,90+i*20),width:35},{...run('0\ue010552',145,90+i*20),width:35});
+const decimalRules=['M0,40L220,40M0,70L220,70M0,150L220,150M0,40L0,150M65,40L65,150M135,40L135,150M220,40L220,150'];
+const [decimalTable]=tableRegions(decimalRuns,decimalRules,250,true);
+assert.equal(decimalTable.type,'table');assert(decimalTable.logicalRows);
+assert(decimalTable.rows[1].every(cell=>cell.recordBands.length===3));
+assert.equal(tableProfile(decimalTable).labels.get(decimalTable.rows[1][1]),'0.1840.1840.184');
+assert.equal(decimalTable.rows[1][1].runs[0].text,'0\ue010184');
+function pairedDecimalFields(headers,firstValues,point='.') {
+ a=0;
+ const items=headers.map((text,i)=>({...run(text,5+i*70,60),width:25}));
+ for(let i=0;i<3;i++)items.push({...run(firstValues[i],5,90+i*20),width:30},
+  {...run('0'+point+'55',75,90+i*20),width:35},{...run('0'+point+'23',145,90+i*20),width:35});
+ return tableRegions(items,decimalRules,250,true)[0];
+}
+for(const dot of ['.','\ue010']) {
+ const rateFields=pairedDecimalFields(['项目','票价','运费'],['甲项目','乙项目','丙项目'],dot);
+ assert.equal(rateFields.type,'table');assert(rateFields.logicalRows);
+ const timeFields=pairedDecimalFields(['车次','到达','开车'],['K1','K2','K3'],dot);
+ assert.equal(timeFields.type,'table-layout');assert.equal(timeFields.reason,'unruled-times');
+}
+assert.equal(pairedDecimalFields(['项目','数值甲','数值乙'],['甲项目','乙项目','丙项目'],':').reason,'unruled-times');
+console.log('通过：同样0.55在费率列保持数值行，在明确时刻列保留原位，私有点字形判据一致。');
 // A code column spanning physical rows with additional unruled category rows
 // needs source-region rendering unless all subrows can be proved.
 a=0;

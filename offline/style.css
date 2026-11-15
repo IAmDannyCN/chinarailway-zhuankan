@@ -215,7 +215,7 @@ dialog::backdrop { background: #18302566; }
 .chapter-label { font-weight: 600; color: var(--secondary); }
 .chapter-link small {
   inline-size: calc(var(--chapter-page-digits, 3) * 1ch);
-  color: var(--muted); font-variant-numeric: tabular-nums;
+  color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums;
   text-align: right; white-space: nowrap;
 }
 .chapter-link:hover { background: var(--subtle); }
@@ -272,4 +272,7 @@ mark .inline-symbol { mix-blend-mode: multiply; }
 }
 .reading-article .source-highlight.current { background: #ffa526; opacity: .68; }
 .source-transcript { white-space: pre-wrap; }
-.chapter-link time { display: block; color: var(--muted); font-size: .84em; margin-top: 2px; }
+.chapter-title { display: block; }
+.chapter-meta { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; color: var(--muted); font-size: 13px; line-height: 1.5; font-weight: 400; }
+.chapter-number, .chapter-meta time { display: block; font-size: inherit; }
+.chapter-meta time { font-variant-numeric: tabular-nums; }

@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from PIL import Image, ImageChops
 from indexer import extract_document, read_page_asset, segment_document, render_document
-from update import discover_sources, make_catalog, validate_document
+from update import discover_sources, make_catalog, saved_pdf_directory, validate_document
 
 
 def check_original(rebuilt, published, label):
@@ -29,7 +29,11 @@ def check_original(rebuilt, published, label):
 
 def check_one(source, temporary_root, expected):
     source, temporary_root = Path(source), Path(temporary_root)
-    copied = temporary_root / source.relative_to(ROOT)
+    try:
+        relative = source.relative_to(ROOT)
+    except ValueError:
+        relative = Path('pdf') / source.name
+    copied = temporary_root / relative
     copied.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.link(source, copied)
@@ -38,6 +42,9 @@ def check_one(source, temporary_root, expected):
     output = temporary_root / 'offline'
     layout = extract_document(copied, output)
     document = segment_document(layout, copied, output)
+    # The temporary copy moves the source file; keep its real-library link for
+    # comparison. The external-link generation itself is covered by check_sources.
+    document['source'] = expected['source']
     document['toc'] = layout['toc']
     render_document(copied, output, layout)
     document['originalPages'] = True
@@ -67,7 +74,7 @@ def main():
     raw = (ROOT / 'offline/data/index.js').read_text(encoding='utf8')
     published = json.loads(raw.removeprefix('window.CATALOG=').strip().removesuffix(';'))
     expected = {doc['file']: doc for doc in published['docs']}
-    sources = discover_sources()
+    sources = discover_sources(pdf_dir=saved_pdf_directory())
     assert {p.name for p in sources} == set(expected), '原始 PDF 与已发布目录不一致，请先运行 update.py'
     documents = []
     with tempfile.TemporaryDirectory(prefix='railway-rebuild-') as directory:

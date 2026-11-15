@@ -15,6 +15,31 @@ function readingFurniture(run, height) {
   return (run.y < height * .11 || run.y > height * .94) && /^[\d.·□、()（）—\-\s]+$/.test(run.text);
 }
 
+function readingParameterLeader(content) {
+  const leader=/(?:\.{4,}|[⋯…·]{3,})/.exec(content);
+  if(!leader || !leader.index || leader.index+leader[0].length===content.length)return null;
+  const label=content.slice(0,leader.index).trim().replace(/[:：]$/,'');
+  const value=content.slice(leader.index+leader[0].length).trim();
+  // Dot leaders connect a short field name to a value. An ellipsis within a
+  // quotation or a sentence is ordinary prose, even if PDF extraction put the
+  // quotation and following words on one physical line.
+  if(!label || label.length>28 || value.length>72 ||
+      /[，。；：！？,;:!?“”‘’"'《》]/.test(label) || /[。；！？;!?“”‘’"']/.test(value))return null;
+  const balanced=text=>{
+    const stack=[],pairs={')':'(', '）':'（',']':'[','】':'【'};
+    for(const ch of text) {
+      if('（([【'.includes(ch))stack.push(ch);
+      else if(pairs[ch] && stack.pop()!==pairs[ch])return false;
+    }
+    return !stack.length;
+  };
+  const cleanValue=value.replace(/\d{1,3}(?:,\d{3})+/g,'0');
+  if(!balanced(label) || !balanced(value) || /[，,、]/.test(cleanValue) ||
+      /\.{4,}|[⋯…·]{3,}/.test(value))return null;
+  leader.dataLike=/[\dA-Za-z]/.test(value) && !/[\u3400-\u9fff]{7}/.test(value);
+  return leader;
+}
+
 // Prose reflows; table geometry preserves row/column correspondence and merged cells.
 function articleBlocks(runs, rules, width, height, part, title) {
   const selectedRuns = sliceReadingRuns(runs, part.a, part.b);
@@ -92,6 +117,17 @@ function articleBlocks(runs, rules, width, height, part, title) {
   const margins = bodyRows.length ? bodyRows : rows;
   const margin = Math.min(...margins.map(row => row.x));
   const rightMargin = Math.max(...margins.map(row => row.right));
+  const parameterLeaders=new Map(rows.map(row=>[row,readingParameterLeader(row.runs.map(run=>run.text).join(''))]).filter(([,leader])=>leader));
+  for(const [row,leader]of parameterLeaders) {
+    if(leader.dataLike)continue;
+    const i=rows.indexOf(row);
+    // Text-only values need a neighbouring aligned field; a lone fragment
+    // ending in an ellipsis is not evidence of a two-column parameter layout.
+    const peer=[rows[i-1],rows[i+1]].some(other=>other && parameterLeaders.has(other) &&
+      Math.abs(other.x-row.x)<=Math.max(row.size,other.size)*1.5 &&
+      Math.abs(other.y-row.y)<=Math.max(row.size,other.size)*2.5);
+    if(!peer)parameterLeaders.delete(row);
+  }
   for(const row of rows) {
     const content=row.runs.map(r=>r.text).join('');
     while(tables.length && tables[0].top<row.y)blocks.push(tables.shift());
@@ -114,7 +150,7 @@ function articleBlocks(runs, rules, width, height, part, title) {
       blocks.push({type: 'continuation', runs: row.runs});
       continue;
     }
-    const leader = /(?:\.{4,}|[⋯…·]{3,})/.exec(content);
+    const leader = parameterLeaders.get(row);
     if (leader && leader.index > 0 && leader.index + leader[0].length < content.length) {
       let offset = 0;
       const label = [], value = [];
@@ -130,8 +166,10 @@ function articleBlocks(runs, rules, width, height, part, title) {
       }
       const previous = blocks.at(-1);
       const rowData = {label, value};
-      if (previous?.type === 'parameters') previous.rows.push(rowData);
-      else blocks.push({type: 'parameters', rows: [rowData]});
+      if (previous?.type === 'parameters') {
+        previous.rows.push(rowData);
+        previous.runs.push(...row.runs);
+      } else blocks.push({type: 'parameters', rows: [rowData], runs: row.runs.slice()});
       continue;
     }
     const heading=/^第[一二三四五六七八九十百\d]+[编章节目]/.test(content) ||
@@ -297,6 +335,8 @@ function canDisplayReadingPart(blocks, decoded, part) {
   const bands = new Map();
   const gutters = [];
   const tables = blocks.filter(block => block.type === 'table');
+  const parameterFrames=blocks.filter(block=>block.type==='parameters').flatMap(block=>
+    block.runs.map(run=>run.parameterFrame).filter(Boolean));
   const inTable = new Set(tables.flatMap(table => table.runs.map(run => run.a)));
   const captions=new Set(blocks.filter(block=>block.tableCaption || block.type==='annotation').flatMap(block=>block.runs.map(run=>run.a)));
   for (const run of selected) {
@@ -329,6 +369,9 @@ function canDisplayReadingPart(blocks, decoded, part) {
           rule.a >= table.left - 1.5 && rule.b <= table.right + 1.5 :
           rule.v >= table.left - 1.5 && rule.v <= table.right + 1.5 &&
           rule.a >= table.top - 1.5 && rule.b <= table.bottom + 1.5))) return true;
+    if(parameterFrames.some(frame=>rule.h?
+      (Math.abs(rule.v-frame.top)<1.5 || Math.abs(rule.v-frame.bottom)<1.5) && rule.a>=frame.left-1.5 && rule.b<=frame.right+1.5:
+      (Math.abs(rule.v-frame.left)<1.5 || Math.abs(rule.v-frame.right)<1.5) && rule.a>=frame.top-1.5 && rule.b<=frame.bottom+1.5))return true;
     const below = selected.some(run => run.y > rule.v && run.y < rule.v + run.size * 1.3 &&
       run.x >= rule.a - 1 && run.x + run.width <= rule.b + 1);
     const titleRule = rule.h && !below && rule.b - rule.a > width * .2 && selected.some(run =>
@@ -435,6 +478,16 @@ function tableRegions(runs, paths, pageWidth, strict = false) {
     const inside=runs.filter(r=>r.x>=left-1 && r.x<right && anchorY(r)>=top && anchorY(r)<bottom);
     if(!inside.length)continue;
     const columns=xs.length-1,rowCount=ys.length-1;
+    if(columns===1 && rowCount===1) {
+      const fields=tablePhysicalLines(inside);
+      if(fields.length>=2 && fields.every(line=>readingParameterLeader(line.runs.map(run=>run.text).join('')))) {
+        // An undecorated rectangle around a list of dot-leader fields is a
+        // frame, not a one-cell data table. Keep the proven fields reflowable.
+        const frame={left,right,top,bottom};
+        inside.forEach(run=>{run.parameterFrame=frame;});
+        continue;
+      }
+    }
     // Excessively fragmented drawings are retained geometrically instead of guessed as cells.
     const fallback=reason=>tables.push({type:'table-layout',reason,runs:inside,rules,left,right,top,bottom});
     if(columns*rowCount>4000){fallback('fragmented');continue;}
@@ -481,13 +534,17 @@ function tableRegions(runs, paths, pageWidth, strict = false) {
     // stacks of mileage values signal that the lines themselves carry row alignment.
     const hasUnruledRows = rows.some(row => row.filter(cell =>
       cell.lines.filter(line => /^[\d０-９]+(?:[.．][\d０-９]+)?$/.test(
-        line.runs.map(run => run.text).join('')
+        tableSemanticText(line.runs.map(run => run.text).join(''))
       )).length >= (strict ? 2 : 3)
     ).length >= 2);
-    const hasStackedTimes = strict && rows.some(row => row.some(cell =>
-      cell.lines.filter(line => /^\d{1,2}[:：.]\d{2}$/.test(line.runs.map(run => run.text).join(''))).length >= 2));
     const table={type:'table',rows,xs,ys,left,right,top,bottom,runs:inside,columns,rules};
-    const records=tableRecordBands(table);
+    const profile=tableProfile(table);
+    const hasStackedTimes = strict && rows.some(row => row.some(cell =>
+      cell.lines.filter(line => {
+        const value=tableSemanticText(line.runs.map(run=>run.text).join(''));
+        return /^\d{1,2}[:：]\d{2}$/.test(value) || profile.columns[cell.c0]?.kind==='time' && /^\d{1,2}\.\d{2}$/.test(value);
+      }).length>=2));
+    const records=tableRecordBands(table,profile);
     if (hasStackedTimes || records.unsafe || hasUnruledRows && !records.handled) {
       fallback(hasStackedTimes ? 'unruled-times' : records.unsafe ? 'unruled-records' : 'unruled-rows');
       continue;
@@ -502,13 +559,17 @@ function tableCellRuns(cell) {
 }
 
 function tableCellText(cell) {
-  return tableCellRuns(cell).map(run => run.text).join('').normalize('NFKC').replace(/\s+/g, '');
+  return tableSemanticText(tableCellRuns(cell).map(run => run.text).join(''));
 }
 
-function tableRecordBands(table) {
-  const profile=tableProfile(table),cells=table.rows.flat();
+function tableSemanticText(text) {
+  return text.normalize('NFKC').replace(/\ue010/g,'.').replace(/\s+/g,'');
+}
+
+function tableRecordBands(table,profile=tableProfile(table)) {
+  const cells=table.rows.flat();
   let handled=false,unsafe=false;
-  const text=line=>line.runs.map(run=>run.text).join('').normalize('NFKC').replace(/\s+/g,'');
+  const text=line=>tableSemanticText(line.runs.map(run=>run.text).join(''));
   const numeric=line=>/^(?:\d+(?:[.．—–-]\d+)?|[—–-])$/.test(text(line));
   // Missing inner verticals (including a partially masked drawing) can leave
   // an entire multi-column continuation as one full-width body cell.

@@ -23,8 +23,11 @@ echo 首次安装 PDF 处理工具需要联网；以后更新可离线运行。
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 if errorlevel 1 goto failed
 :update
-echo 更新 pdf 和“新增专刊”文件夹中的全部专刊。
-".venv\Scripts\python.exe" update.py
+if "%~1"=="" (
+  ".venv\Scripts\python.exe" update.py --interactive
+) else (
+  ".venv\Scripts\python.exe" update.py %*
+)
 if errorlevel 1 goto failed
 start "" "%CD%\offline\index.html"
 echo 更新完成。

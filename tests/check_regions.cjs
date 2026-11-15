@@ -3,7 +3,7 @@ const fs=require('node:fs'),assert=require('node:assert/strict');
 const queryTerms=['甲'];
 const f=new Function('originalURL','normalize','escapeHtml','terms',
  fs.readFileSync(__dirname+'/../offline/flow.js','utf8')+'\n'+fs.readFileSync(__dirname+'/../offline/reader.js','utf8')+
- ';return {croppedOriginal,mergeReadingCrops,blocksHTML,originalHighlights,inlineRuns,readingRunsWithGraphics,readingGraphicsByGroup,tableHTML};')(
+ ';return {croppedOriginal,mergeReadingCrops,blocksHTML,originalHighlights,inlineRuns,readingRunsWithGraphics,readingGraphicsByGroup,tableHTML,readingParallelColumns};')(
  ()=> '../pdf/test.pdf',s=>s,s=>s, queryTerms);
 const document={id:'test',entries:[],texts:['甲乙丙'],sizes:[[300,500]]};
 const runs=[
@@ -48,6 +48,17 @@ assert.equal(punct('共计123.'),'共计123。');
 assert.equal(punct('https://rail.example/a:b?x=1.2;v=3'), 'https://rail.example/a:b?x=1.2;v=3');
 assert.equal(punct('KH2010105000.pdf'), 'KH2010105000.pdf');
 assert.equal(punct('0.40元/吨公里'), '0.40元/吨公里');
+assert.equal(punct('整车每吨公里0\ue010184元,集装箱4\ue0106元。'),'整车每吨公里0.184元，集装箱4.6元。');
+assert.equal(punct('附件:1\ue010德大线;2.史口线。'),'附件：1.德大线；2.史口线。');
+assert.equal(punct('附注2改为:“......滨州北”'),'附注2改为：“......滨州北”');
+const ellipsisText='改为:“......滨州北”';
+queryTerms.splice(0,queryTerms.length,'滨州北');
+const ellipsisHTML=f.inlineRuns([{text:ellipsisText,a:100,b:100+ellipsisText.length,p:0}]);
+assert(ellipsisHTML.includes('……'));
+assert(!ellipsisHTML.includes('。。。。'));
+assert(ellipsisHTML.includes('data-offset="110"'),'省略号排印后的检索仍使用原始文字位置');
+assert(f.inlineRuns([{text:'https://rail.example/a...b',a:0,b:26,p:0}]).includes('a...b'),'网址中的连续点不能变成省略号字符');
+queryTerms.splice(0,queryTerms.length,'正');
 console.log('通过：中文全角标点、编号点与正文句号分开处理，小数/时刻/单位/网址/文件名保留，字符索引长度不变。');
 
 assert.equal(punct('2\ue010办理有关事项.'),'2.办理有关事项。');
@@ -57,6 +68,8 @@ const listHTML=new Function('normalize','escapeHtml','terms',fs.readFileSync(__d
 assert(listHTML.includes('clause-marker-end'));
 assert(listHTML.includes('data-offset="20"'));
 assert(!listHTML.includes('\ue010'));
+const attachmentList=f.inlineRuns([{text:'附件:1\ue010线路表',a:0,b:9,p:0}],{paragraph:true});
+assert(attachmentList.includes('clause-marker-end'),'附件清单冒号后的编号也应规范点号及间距');
 const listDot={kind:'symbol',rect:[10,10,12,12],a:1,b:2,text:'\ue010'};
 const listGraphic=f.inlineRuns([
  {text:'1',a:0,b:1,p:0,x:0,y:15,width:8,size:10},
@@ -66,6 +79,20 @@ const listGraphic=f.inlineRuns([
 assert(!listGraphic.includes('class="inline-symbol"'),'编号点在符号token化前转成正常点，不能飘进正文');
 assert(listGraphic.includes('>.</span>'));
 console.log('通过：1.、2.编号保留规范点及间距，特殊点字形不再原样误排。');
+
+const decimalDot={kind:'symbol',rect:[10,10,12,12],a:41,b:42,text:'\ue010'};
+const actualNormalize=new Function(fs.readFileSync(__dirname+'/../offline/app.js','utf8')
+  .split('window.PAGE_COORDS')[0]+';return normalize;')();
+const decimalReading=new Function('normalize','escapeHtml','terms',fs.readFileSync(__dirname+'/../offline/reader.js','utf8')+';return inlineRuns;')(
+  actualNormalize,s=>s,['0.184']);
+const decimalHTML=decimalReading([
+ {text:'0',a:40,b:41,p:0,x:0,y:15,width:8,size:10},
+ {text:'\ue010',a:41,b:42,p:0,x:10,y:15,width:2,size:10,graphicChars:{41:decimalDot},graphicPage},
+ {text:'184元',a:42,b:46,p:0,x:14,y:15,width:30,size:10}
+]);
+assert(!decimalHTML.includes('inline-symbol'),'数值里的字体点号必须显示小数点，不能变成黑点图片');
+assert(decimalHTML.includes('<mark data-page="0" data-offset="40">'),'小数检索仍映射原始索引');
+console.log('通过：旧字体小数点和附件清单编号显示正常，小数可检索且不改变原字符索引。');
 
 queryTerms.splice(0);
 const inserted={kind:'symbol',rect:[20,10,30,20],a:11,b:11,p:0,src:'test.webp',size:[300,500]};
@@ -143,3 +170,10 @@ assert(internalGap.includes('</span> <span'),'PDF把显著空白丢在同一run�
 const wrapped=codeCell(trainHTML([{runs:[codeRun('K566/3/',0,20)]},{runs:[codeRun('6/3',7,35)]}]));
 assert.equal((wrapped.match(/<div>/g)||[]).length,1,'一个车次在斜杠处折行仍为一个号码');
 console.log('通过：同格独立车次按行分开，显著空白分隔，斜杠处的单车次折行保持连续。');
+
+const lanes=Array.from({length:4},(_,line)=>[0,70,140,210].map((x,col)=>({
+ text:col%2?'12345':'品名',a:line*20+col*5,b:line*20+col*5+2,line,x,y:20+line*14,width:30,size:10,p:0
+}))).flat();
+assert(f.readingParallelColumns(lanes,324),'重复多栏索引不能按个别字段误当独立参数后拆成碎片');
+assert(!f.readingParallelColumns(lanes.filter(run=>run.x<100),324),'单组名称和值仍可用参数方式表示');
+console.log('通过：多栏失败区域整体保留原形，单组参数不被多栏判据误拒绝。');

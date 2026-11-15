@@ -197,6 +197,26 @@ function croppedOriginal(document,part,decoded,rect,kind='layout',specificRuns) 
     a:runs[0]?.a??part.a,text:runs.map(run=>run.text).join(''),
     anchors:runs.map(run=>({a:run.a,y:run.y/height*100,x:run.x/width*100}))};
 }
+function readingParallelColumns(runs,width) {
+  const rows=new Map(),gutters=[];
+  for(const run of runs) {
+    const key=run.line??Math.round(run.y/2);
+    if(!rows.has(key))rows.set(key,[]);
+    rows.get(key).push(run);
+  }
+  for(const [key,row] of rows) {
+    row.sort((a,b)=>a.x-b.x);
+    for(let i=1;i<row.length;i++) {
+      const prior=row[i-1],run=row[i],end=prior.inkRight??prior.x+prior.width,gap=run.x-end;
+      if(gap<Math.max(3,Math.min(prior.size,run.size)*1.05,width*.025))continue;
+      const center=(run.x+end)/2;
+      let gutter=gutters.find(gutter=>Math.abs(gutter.center-center)<=2);
+      if(!gutter){gutter={center,rows:new Set()};gutters.push(gutter);}
+      gutter.rows.add(key);
+    }
+  }
+  return gutters.filter(gutter=>gutter.rows.size>=3).length>=2;
+}
 function regionalReadingBlocks(decoded,part,entry,title) {
   const {width,height}=decoded,document=entry.document;
   const regions=(decoded.regions||[]).filter(region=>region.a<part.b && region.b>part.a ||
@@ -253,6 +273,11 @@ function regionalReadingBlocks(decoded,part,entry,title) {
     const bounds=readingBounds(zoneRuns,width,height,2,zone.flatMap(block=>block.graphics||[]));
     const zoneDecoded={...clean,runs:zoneRuns,rules:regionRules(rules,[bounds],true)};
     if(canDisplayReadingPart(zone,zoneDecoded,part)){blocks.push(...zone);zone=[];return;}
+    // A stable multi-column index is one layout, even if an isolated row looks
+    // like a name/value pair. Do not interleave tiny crops and confident rows.
+    if(readingParallelColumns(zoneRuns,width)) {
+      blocks.push(croppedOriginal(document,part,decoded,bounds,'layout',zoneRuns));zone=[];return;
+    }
     const checks=zone.map(block=>{
       const box=readingBounds(block.runs||[],width,height,2,block.graphics);
       return {block,box,valid:canDisplayReadingPart([block],{...clean,runs:block.runs||[],rules:regionRules(rules,[box],true)},part)};
@@ -369,6 +394,8 @@ function readingMatches(text) {
 function readingListMarker(text) {
   const plain=/^\s*[0-9０-９]{1,3}[.．。\ue010](?![0-9０-９])/.exec(text);
   if(plain)return {end:plain[0].length,dot:plain[0].length-1};
+  const attachment=/^\s*(?:附件|附表|附录)[:：]\s*[0-9０-９]{1,3}[.．。\ue010](?![0-9０-９])/.exec(text);
+  if(attachment)return {end:attachment[0].length,dot:attachment[0].length-1};
   const nested=/^\s*[0-9０-９]{1,3}(?:[.．][0-9０-９]{1,3}){1,4}(?![0-9０-９.．])/.exec(text);
   if(nested && /^\s*[\u4e00-\u9fff（(]/.test(text.slice(nested[0].length)) &&
       !/^\s*(?:公里|千米|毫米|厘米|立方|千克|小时|分钟|毫|米|吨|元|日|月|年|分|秒)/.test(text.slice(nested[0].length)))return {end:nested[0].length};
@@ -380,11 +407,15 @@ function readingPunctuation(text) {
   const protectedAt=new Uint8Array(text.length);
   const token=/(?:https?|ftp):\/\/[A-Za-z0-9_~:/?#@!$&'()*+,;=%.-]+|[A-Za-z0-9_.+-]+@[A-Za-z0-9.-]+|[A-Za-z]:[\\/][A-Za-z0-9_ .\\/-]+|[A-Za-z0-9_-]+\.(?:pdf|docx?|xlsx?|csv|html?|js|py|zip)\b/gi;
   for(const match of text.matchAll(token))protectedAt.fill(1,match.index,match.index+match[0].length);
+  for(const match of text.matchAll(/\.{3,}/g))protectedAt.fill(1,match.index,match.index+match[0].length);
   const marker=readingListMarker(text);
+  const listDots=new Set([...text.matchAll(/(?:^|[：:；;\n])\s*[0-9０-９]{1,3}[.．。\ue010](?![0-9０-９])(?=\s*[\u4e00-\u9fff《“(（A-Za-z])/g)]
+    .map(match=>match.index+match[0].length-1));
   const marks={',':'，',':':'：',';':'；','?':'？','!':'！','(':'（',')':'）'};
   return text.split('').map((ch,i)=>{
     if(protectedAt[i])return ch;
-    if(i===marker?.dot)return '.';
+    if(i===marker?.dot || listDots.has(i))return '.';
+    if(ch==='\ue010' && /[0-9０-９]/.test(text[i-1]||'') && /[0-9０-９]/.test(text[i+1]||''))return '.';
     if(ch==='.' || ch===':') {
       if(/[0-9０-９]/.test(text[i-1]||'') && /[0-9０-９]/.test(text[i+1]||''))return ch;
       if(ch==='.')return /[A-Za-z]/.test(text[i-1]||'') && /[A-Za-z]/.test(text[i+1]||'')?'.':
@@ -553,7 +584,10 @@ function inlineRuns(runs,options={}) {
 
 function readingRunText(run, start, end, displayValue) {
   const value = displayValue??run.text.slice(start, end);
-  if ((!run.symbols || !run.symbolPage) && !Object.keys(run.graphicChars||{}).length) return escapeHtml(value);
+  const hasGraphic=Array.from({length:end-start},(_,i)=>readingRunOffset(run,start+i)).some(offset=>run.graphicChars?.[offset]);
+  if (!/[\ue000-\uf8ff]/.test(value) && !hasGraphic) return escapeHtml(value.replace(/\.{3,}/g,(dots,at)=>
+    /[A-Za-z0-9_\/\\@%.-]/.test((value[at-1]||'')+(value[at+dots.length]||''))?dots:'…'.repeat(Math.ceil(dots.length/3))));
+  if ((!run.symbols || !run.symbolPage) && !hasGraphic) return escapeHtml(value);
   return [...value].map((character, index) => {
     if(character==='.' && /[．。\ue010]/.test(run.text[start+index]||''))return '.';
     const offset=readingRunOffset(run,start+index),graphic=run.graphicChars?.[offset];
@@ -638,7 +672,7 @@ function tableHTML(block, grouped = false) {
     const positions=station.lines.map(line=>line.y),size=station.lines[0].size;
     const quantities=row.filter(cell=>cell.c0===cell.c1 && columns[cell.c0].kind==='number' &&
       cell.lines.length===positions.length && cell.lines.every((line,i)=>
-        /^[\d０-９.．—–-]+$/.test(line.runs.map(run=>run.text).join('')) && Math.abs(line.y-positions[i])<size*.7));
+        /^[\d０-９.．—–-]+$/.test(readingPunctuation(line.runs.map(run=>run.text).join(''))) && Math.abs(line.y-positions[i])<size*.7));
     if(quantities.length<2)continue;
     for(const cell of row) {
       if(cell.lines.length<2 || cell.r1!==station.r1 || cell.c0!==cell.c1)continue;
@@ -652,7 +686,7 @@ function tableHTML(block, grouped = false) {
   }
   function renderCell(cell) {
     const column = columns[cell.c0];
-    const label = labels.get(cell);
+    const label = readingPunctuation(labels.get(cell)).normalize('NFKC');
     const header = cell.r0 < headerRows && cell.r1 < headerRows;
     const body = cell.r0 >= headerRows;
     const station = body && cell.c0 === cell.c1 && column.station;
@@ -662,7 +696,7 @@ function tableHTML(block, grouped = false) {
     let nowrap = false;
     const runs = tableCellRuns(cell);
     const stackedNumbers = cell.lines.length > 1 && cell.lines.every(line =>
-      /^(?:[+−—-]?[０-９0-9]+(?:[.．][０-９0-9]+)?|[—–-])$/.test(line.runs.map(run => run.text).join('')));
+      /^(?:[+−—-]?[０-９0-9]+(?:[.．][０-９0-9]+)?|[—–-])$/.test(readingPunctuation(line.runs.map(run => run.text).join(''))));
     let content;
     function stationLine(runs,graphics=[]) {
         if(!runs.length)return `<div>${inlineRuns(runs,{graphics})}</div>`;

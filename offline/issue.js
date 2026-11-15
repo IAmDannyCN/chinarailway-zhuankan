@@ -3,8 +3,65 @@
 let issueView = null;
 
 function originalURL(document, number) {
-  const path = (document.source || '../pdf/' + document.file).split('/').map(encodeURIComponent).join('/');
+  const source = document.source || '../pdf/' + document.file;
+  const path = /^file:\/\//i.test(source) ? source : source.split('/').map(encodeURIComponent).join('/');
   return number == null ? path : path + '#page=' + (number + 1);
+}
+
+function issueDateISO(value) {
+  const text=String(value||'').normalize('NFKC').replace(/\s+/g,'').replace(/^\(|\)$/g,'');
+  const digits={'〇':'0','○':'0','零':'0','O':'0','一':'1','二':'2','三':'3','四':'4','五':'5','六':'6','七':'7','八':'8','九':'9'};
+  const numeric=part=>[...part].map(ch=>digits[ch]??ch).join('');
+  const integer=part=>{
+    part=numeric(part).replace(/^廿/,'2十').replace(/^卅/,'3十');
+    if(/^\d+$/.test(part))return Number(part);
+    const tens=/^(\d?)十(\d?)$/.exec(part);
+    return tens?Number(tens[1]||1)*10+Number(tens[2]||0):NaN;
+  };
+  const chinese=/^([〇○零O一二三四五六七八九\d]{4})年([〇○零一二三四五六七八九十廿卅\d]{1,3})月([〇○零一二三四五六七八九十廿卅\d]{1,3})日$/.exec(text);
+  const arabic=/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(text);
+  const match=chinese||arabic;
+  if(!match)return '';
+  const year=Number(numeric(match[1])),month=integer(match[2]),day=integer(match[3]);
+  if(year<1000 || year>9999 || month<1 || month>12 || day<1 || day>31)return '';
+  const date=new Date(Date.UTC(year,month-1,day));
+  if(date.getUTCFullYear()!==year || date.getUTCMonth()!==month-1 || date.getUTCDate()!==day)return '';
+  return `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+}
+
+function issueChapterKey(value) {
+  return normalize(value||'').replace(/\ufffd+/g,'')
+    .replace(/^(?:[一二三四五六七八九十百]+[、.]|[0-9]+[.、])/, '')
+    .replace(/^(?:附件|附表)[一二三四五六七八九十\d]*[:：]?/, '')
+    .replace(/\([^)]*\d[^)]*\)$/, '').replace(/[《》“”‘’"'：:，,；;。]/g,'');
+}
+
+function issueChapterEntry(document,title,p,used=new Set()) {
+  const key=issueChapterKey(title);
+  if(!key)return null;
+  const matches=document.entries.flatMap(entry=>{
+    const onPage=entry.parts.some(part=>part.p===p);
+    if(!onPage && Math.abs(entry.p-p)>1)return [];
+    const candidate=issueChapterKey(entry.title);
+    const exact=candidate===key;
+    const shorter=key.length<candidate.length?key:candidate;
+    const longer=key.length<candidate.length?candidate:key;
+    const prefix=shorter.length>=8 && longer.startsWith(shorter) &&
+      (shorter.length/longer.length>=.5 || onPage && entry.kind==='附件' && key.startsWith(candidate));
+    const missingGlyph=onPage && shorter.length>=10 && longer.length===shorter.length+1 &&
+      [...longer].some((_,i)=>longer.slice(0,i)+longer.slice(i+1)===shorter);
+    if(!exact && !prefix && !missingGlyph)return [];
+    return [{entry,score:(exact?10:missingGlyph?3:0)+(onPage?4:0)+(entry.p===p?2:0)-(used.has(entry.id)?1:0)}];
+  }).sort((a,b)=>b.score-a.score || Math.abs(a.entry.p-p)-Math.abs(b.entry.p-p) || a.entry.a-b.entry.a);
+  if(!matches.length || matches.length>1 && matches[0].score===matches[1].score &&
+      issueChapterKey(matches[0].entry.title)!==issueChapterKey(matches[1].entry.title))return null;
+  return matches[0].entry;
+}
+
+function issueChapterLabel({title,number,date}) {
+  const details=[number?`<span class="chapter-number">${escapeHtml(readingPunctuation(number))}</span>`:'',
+    date?`<time datetime="${escapeHtml(date)}">${escapeHtml(date)}</time>`:''].filter(Boolean).join('');
+  return `<span class="chapter-copy"><span class="chapter-title">${escapeHtml(readingPunctuation(title))}</span>${details?`<span class="chapter-meta">${details}</span>`:''}</span>`;
 }
 
 function issueSections(document, sourcePages = new Set()) {
@@ -42,21 +99,19 @@ function issueChapters(document, sections) {
     [level,title.replace(/\ufffd+/g,'').trim(),page]).filter(([, title]) => title);
   const bookmarks=rawBookmarks.filter(([,title])=>!/^.*\.(?:pdf|docx?|xls[x]?)$/i.test(title));
   if (bookmarks.some(([, , p]) => p > 0 && p <= document.pages)) {
-    const bookmarkTitle = value => normalize(value).replace(/^(?:[一二三四五六七八九十百]+、|[0-9]+[.、])/, '')
-      .replace(/\([^)]*\d[^)]*\)$/, '');
+    const used=new Set();
     return bookmarks.map(([level, title, number]) => {
       const p = number - 1;
       if (p < 0 || p >= document.pages) return {level, title};
-      const key = bookmarkTitle(title);
-      const matches = sections.filter(section => bookmarkTitle(section.title) === key);
-      const entry = matches.find(section => section.parts.some(part => part.p === p)) ||
-        matches.find(section => Math.abs(section.p - p) === 1);
+      const entry=issueChapterEntry(document,title,p,used);
+      if(entry)used.add(entry.id);
       const offset = document.texts[p].indexOf(title.toLowerCase().replace(/\s+/g, ''));
-      return {level, title, p, date: entry?.date, a: entry?.parts.find(part => part.p === p)?.a ?? Math.max(0, offset)};
+      return {level,title:entry?.kind==='附件'?entry.title:title,p,number:entry?.number||'',date:issueDateISO(entry?.date),
+        a:entry?.parts.find(part=>part.p===p)?.a??Math.max(0,offset)};
     });
   }
   const chapters = sections.filter(section => section.heading)
-    .map(section => ({level: section.parentId ? 2 : 1, title: section.title, date: section.date, p: section.p, a: section.a}));
+    .map(section => ({level:section.parentId?2:1,title:section.title,number:section.number||'',date:issueDateISO(section.date),p:section.p,a:section.a}));
   return chapters.length ? chapters : document.texts.map((_, p) =>
     ({level: 1, title: `PDF 第 ${p + 1} 页`, p, a: 0}));
 }
@@ -94,8 +149,8 @@ function openIssue(document, original = false) {
   const chapters = issueChapters(document, sections);
   const contents = $('issueContents');
   contents.style.setProperty('--chapter-page-digits', Math.max(3, String(document.pages).length));
-  contents.innerHTML = chapters.map(({level, title, p, date}, index) => {
-    const label = `<span>${escapeHtml(readingPunctuation(title))}${date ? '<time>' + escapeHtml(date) + '</time>' : ''}</span>`;
+  contents.innerHTML = chapters.map((chapter, index) => {
+    const {level,p}=chapter,label=issueChapterLabel(chapter);
     const style = `style="--chapter-indent:${Math.min(6, Math.max(0, level - 1))}"`;
     return p == null ? `<div class="chapter-label" ${style}>${label}</div>` :
       `<button class="chapter-link" ${style} data-chapter="${index}">${label}<small>${p + 1}</small></button>`;

@@ -20,10 +20,83 @@ from importlib.metadata import version as package_version
 from urllib.parse import quote
 
 sys.dont_write_bytecode = True
-from indexer import EXTRACT_VERSION, SEGMENT_VERSION, atomic_text, extract_document, read_page_asset, render_document, segment_document, writejs
+from indexer import EXTRACT_VERSION, SEGMENT_VERSION, atomic_text, extract_document, read_page_asset, render_document, segment_document, source_reference, writejs
 
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / 'offline'
+
+
+def saved_pdf_directory(root=ROOT):
+    settings = Path(root) / 'offline' / '更新设置.json'
+    if not settings.exists():
+        return None
+    try:
+        value = json.loads(settings.read_text(encoding='utf8')).get('pdfDirectory')
+    except (ValueError, OSError) as error:
+        raise ValueError('无法读取 offline/更新设置.json，请重新指定 PDF 目录。') from error
+    if not value:
+        return None
+    directory = Path(value).expanduser()
+    return (directory if directory.is_absolute() else Path(root) / directory).resolve()
+
+
+def save_pdf_directory(directory, root=ROOT):
+    settings = Path(root) / 'offline' / '更新设置.json'
+    if directory is None:
+        settings.unlink(missing_ok=True)
+        return
+    directory = Path(directory).resolve()
+    try:
+        value = directory.relative_to(Path(root).resolve()).as_posix()
+    except ValueError:
+        value = str(directory)
+    atomic_text(settings, json.dumps({'pdfDirectory': value}, ensure_ascii=False, indent=2))
+
+
+def choose_pdf_directory(initial=None):
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        window = tk.Tk()
+        window.withdraw()
+        try:
+            selected = filedialog.askdirectory(title='选择专刊 PDF 存储目录',
+                                               initialdir=str(initial or ROOT / 'pdf'), mustexist=True)
+        finally:
+            window.destroy()
+    except Exception as error:
+        # Tk may be absent in a command-line Python distribution.
+        raise ValueError('当前 Python 无法打开目录选择窗口，请用 --pdf-dir 指定目录，或直接输入目录路径。') from error
+    return Path(selected).resolve() if selected else None
+
+
+def interactive_pdf_directory(current):
+    print('PDF 目录：' + (str(current) if current else '项目内的 pdf 和“新增专刊”'), flush=True)
+    print('回车沿用；输入路径指定目录；输入 ? 打开选择窗口；输入 default 恢复项目目录。', flush=True)
+    try:
+        value = input('目录：').strip()
+    except EOFError:
+        return current, False
+    if not value:
+        return current, False
+    if value.lower() == 'default':
+        return None, True
+    if value == '?':
+        selected = choose_pdf_directory(current)
+        if selected is None:
+            raise ValueError('已取消选择，原有索引和目录设置保留。')
+        return selected, True
+    # Finder drops shell-quoted paths; Windows Explorer uses surrounding quotes.
+    if os.name != 'nt':
+        import shlex
+        try:
+            parts = shlex.split(value)
+            if len(parts) == 1:
+                value = parts[0]
+        except ValueError:
+            pass
+    value = value.strip('"\'')
+    return Path(value).expanduser().resolve(), True
 
 
 def make_catalog(documents, previous=None):
@@ -84,13 +157,21 @@ def update_lock(path):
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def discover_sources(root=ROOT):
-    extra = root / '新增专刊'
-    extra.mkdir(exist_ok=True)
-    paths = sorted(path for folder in [root / 'pdf', extra] if folder.exists()
-                   for path in folder.rglob('*') if path.is_file() and path.suffix.lower() == '.pdf')
+def discover_sources(root=ROOT, pdf_dir=None):
+    root = Path(root)
+    if pdf_dir is None:
+        extra = root / '新增专刊'
+        extra.mkdir(exist_ok=True)
+        folders = [root / 'pdf', extra]
+    else:
+        folder = Path(pdf_dir).expanduser().resolve()
+        if not folder.is_dir():
+            raise ValueError('PDF 目录不存在或不是文件夹：' + str(folder))
+        folders = [folder]
+    paths = sorted({path.resolve() for folder in folders if folder.exists()
+                    for path in folder.rglob('*') if path.is_file() and path.suffix.lower() == '.pdf'})
     if not paths:
-        raise ValueError('pdf 和“新增专刊”文件夹中没有 PDF。')
+        raise ValueError('指定目录及其子目录中没有 PDF。' if pdf_dir is not None else 'pdf 和“新增专刊”文件夹中没有 PDF。')
     names = collections.Counter(path.name.casefold() for path in paths)
     duplicates = [name for name, count in names.items() if count > 1]
     if duplicates:
@@ -105,7 +186,7 @@ def prepare(path, output, layout=None):
     stamp=hashlib.sha256((ROOT/'indexer.py').read_bytes()).hexdigest()
     if cache.exists():
         with gzip.open(cache,'rt',encoding='utf8') as stream: saved=json.load(stream)
-        if saved.get('stamp')==stamp and saved['document']['source']=='../'+Path(path).relative_to(Path(output).parent).as_posix():
+        if saved.get('stamp')==stamp and saved['document']['source']==source_reference(path, output):
             return dict(saved['document'], toc=layout['toc'])
     if sum(len(page['t']) for page in layout['pages']) < 50:
         raise ValueError('未提取到足够文字，可能是扫描件；请先完成 OCR。')
@@ -279,6 +360,11 @@ def write_reports(documents, output, built):
 
 def main():
     parser = argparse.ArgumentParser(description='更新 pdf 和“新增专刊”文件夹中的全部 PDF。')
+    source_options = parser.add_mutually_exclusive_group()
+    source_options.add_argument('--pdf-dir', metavar='目录', help='从指定目录及其子目录读取 PDF；成功后记住此目录，不复制原文件')
+    source_options.add_argument('--choose-pdf-dir', action='store_true', help='打开窗口选择 PDF 目录')
+    source_options.add_argument('--reset-pdf-dir', action='store_true', help='恢复读取项目内的 pdf 和“新增专刊”')
+    parser.add_argument('--interactive', action='store_true', help='更新前选择或沿用 PDF 目录（双击入口使用）')
     parser.add_argument('--all', action='store_true', help='兼容旧命令；现在默认处理全部文件')
     parser.add_argument('--jobs', type=int, default=min(6, max(1, (os.cpu_count() or 2) - 2)), help='同时处理的文件数，默认最多 6 个')
     parser.add_argument('--check-only', action='store_true', help='检查当前已发布索引，不改动索引')
@@ -295,10 +381,25 @@ def main():
             print(f'检查通过：{len(data["docs"])} 份，{sum(d["pages"] for d in data["docs"])} 页。')
             return
         try:
-            paths = discover_sources()
+            directory = None if args.pdf_dir is not None or args.reset_pdf_dir or args.choose_pdf_dir else saved_pdf_directory()
+            changed_directory = False
+            if args.pdf_dir is not None:
+                directory, changed_directory = Path(args.pdf_dir).expanduser().resolve(), True
+            elif args.reset_pdf_dir:
+                directory, changed_directory = None, True
+            elif args.choose_pdf_dir:
+                directory = choose_pdf_directory(directory)
+                if directory is None:
+                    print('已取消选择，原有索引和目录设置保留。')
+                    return
+                changed_directory = True
+            elif args.interactive:
+                directory, changed_directory = interactive_pdf_directory(directory)
+            paths = discover_sources(pdf_dir=directory)
         except ValueError as error:
             raise SystemExit(str(error)) from error
-        sources = {path.relative_to(ROOT).as_posix(): (path, hashlib.sha256(path.read_bytes()).hexdigest())
+        print('读取 PDF 目录：' + (str(directory) if directory else '项目内的 pdf 和“新增专刊”'), flush=True)
+        sources = {source_reference(path, OUT): (path, hashlib.sha256(path.read_bytes()).hexdigest())
                    for path in paths}
         pipeline = hashlib.sha256(
             b''.join((ROOT / name).read_bytes() for name in ['indexer.py', 'update.py', 'requirements.txt'])
@@ -317,7 +418,7 @@ def main():
         reusable = {}
         if previous and status.get('pipeline') == pipeline and status.get('contentHash') == previous.get('contentHash'):
             for document in previous['docs']:
-                source = document['source'].removeprefix('../')
+                source = document['source']
                 if source in sources and sources[source][1] == document['digest'] and has_reading_files(document, OUT):
                     reusable[source] = document
         pending = [values for name, values in sources.items() if name not in reusable]
@@ -325,6 +426,8 @@ def main():
         if not pending and status.get('signature') == signature and all(
                 (OUT / name).is_file() for name in ['入库检查报告.html', '入库统计.json', '生成记录.json']):
             print('资料和程序均未变化，沿用现有结果。', flush=True)
+            if changed_directory:
+                save_pdf_directory(directory)
             print_result(documents)
             return
         errors, processed = [], []
@@ -375,6 +478,8 @@ def main():
                 shutil.rmtree(folder)
         remove_legacy_review_list(OUT, previous)
         atomic_text(receipt, json.dumps(dict(signature=signature, pipeline=pipeline, contentHash=data['contentHash'])))
+        if changed_directory:
+            save_pdf_directory(directory)
         if (OUT / '更新错误.json').exists():
             (OUT / '更新错误.json').unlink()
         print_result(documents)

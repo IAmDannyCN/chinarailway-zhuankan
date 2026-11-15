@@ -14,8 +14,11 @@ if ! .venv/bin/python -c "import importlib.metadata as m; assert m.version('PyMu
   echo "首次安装 PDF 处理工具需要联网；以后更新可离线运行。"
   .venv/bin/python -m pip install -r requirements.txt || exit 1
 fi
-echo "更新 pdf 和“新增专刊”文件夹中的全部专刊。"
-.venv/bin/python update.py
+if [[ $# -gt 0 ]]; then
+  .venv/bin/python update.py "$@"
+else
+  .venv/bin/python update.py --interactive
+fi
 result=$?
 if [[ $result -eq 0 ]]; then
   open "offline/index.html"

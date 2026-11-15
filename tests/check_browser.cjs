@@ -50,6 +50,7 @@ if (corpus) {
     'kh2010105000.pdf','kh1988102000.pdf','kh2012101000.pdf','kh2013101000.pdf','铁路客货运输2022-1.pdf',
     'kh2001102000.pdf','kh2004105000.pdf','kh1993201000.pdf',
     'kh1981104000.pdf','kh1997202000.pdf','kh2012104000.pdf','kh2013104050.pdf',
+    'KH2015105000.pdf','kh2010103000.pdf','kh1967405000.pdf',
     ...typedTables.map(([file]) => file)]);
   const selected = new Set(all.filter(doc => names.has(doc.file)));
   const decades = [...new Set(all.map(doc => Math.floor(doc.year / 10)))];
@@ -380,6 +381,36 @@ async function eventually(check, label) {
       assert.deepEqual(observed.text, expected, file);
       if (!expected.length) assert(observed.preserved, file);
     }
+    await run(`(async () => {
+      const doc=catalog.docs.find(doc=>doc.file==='KH2015105000.pdf');
+      const notice=doc.entries.find(entry=>entry.p===8 && entry.kind==='文件');
+      const chapters=issueChapters(doc,issueSections(doc));
+      const chapter=chapters.find(item=>item.p===8 && item.number===notice.number);
+      if(!chapter || chapter.date!=='2015-09-25')throw Error('目录文号/阿拉伯日期没有对应文件');
+      for(const [p,title] of [[11,'德大线客运运价里程表'],[12,'德大线货物运价里程表'],
+          [16,'侯阎线侯禹段客运运价里程表'],[17,'侯阎线侯禹段货物运价里程表']]) {
+        const entry=doc.entries.find(entry=>entry.p===p && entry.kind==='附件');
+        if(entry?.title!==title || !chapters.some(item=>item.p===p && item.title===title))throw Error('附件表题仍混有首末站 '+p);
+        const section=await renderReadingSection({...entry,document:doc},renderSerial);
+        if(!section.querySelector('table') || section.querySelector('.source-page'))throw Error('近似标准表不应因单个破折号整表回退 '+p);
+        if(!/黄河涯|侯马北/.test(section.textContent))throw Error('清理题名不能丢失首末站正文');
+      }
+      const prose=await renderReadingSection({...notice,parts:notice.parts.filter(part=>[9,10].includes(part.p)),document:doc},renderSerial);
+      if(prose.querySelector('.source-page') || prose.querySelector('.article-parameters'))throw Error('修订引文的省略号不得拆成原形加参数表');
+      if(!prose.textContent.includes('0.184') || !prose.textContent.includes('0.00184'))throw Error('字体小数点必须正常显示');
+      const encoded=catalog.docs.find(doc=>doc.file==='kh2010103000.pdf');
+      const entry=encoded.entries.find(entry=>entry.parts.some(part=>part.p===21));
+      const fallback=await renderReadingSection({...entry,parts:entry.parts.filter(part=>part.p===21),document:encoded},renderSerial);
+      if(!fallback.querySelector('.source-page'))throw Error('整段伪编码仍须保留原形');
+      const technical=catalog.docs.find(doc=>doc.file==='kh2007106000.pdf');
+      const standard=technical.entries.find(entry=>entry.title==='机车及客车技术标准' && entry.parts.some(part=>part.p===121));
+      const parameters=await renderReadingSection({...standard,parts:standard.parts.filter(part=>part.p===121),document:technical},renderSerial);
+      if(parameters.querySelector('.source-page') || parameters.querySelectorAll('.article-parameters dt').length!==10)throw Error('矩形外框中的十项真实参数不应回退原形');
+      const multi=catalog.docs.find(doc=>doc.file==='kh1967405000.pdf');
+      const index=multi.entries.find(entry=>entry.parts.some(part=>part.p===58));
+      const area=await renderReadingSection({...index,parts:index.parts.filter(part=>part.p===58),document:multi},renderSerial);
+      if(area.querySelectorAll('.source-page').length!==1 || area.querySelector('.article-parameters'))throw Error('多栏索引应连贯原形显示，不能碎片与伪参数混拼');
+    })()`);
     const total = {pages: 0, source: 0, tables: 0, prose: 0};
     for (const doc of realDocs) {
       const checked = await run(`(async () => {

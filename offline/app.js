@@ -11,6 +11,7 @@ const normalize = text => text.normalize('NFKC')
   .replace(/（/g, '(')
   .replace(/）/g, ')')
   .replace(/。/g, '.')
+  .replace(/\ue010/g, '.')
   .toLowerCase();
 
 window.PAGE_COORDS = {};

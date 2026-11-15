@@ -18,7 +18,7 @@ import pymupdf
 from PIL import Image
 
 EXTRACT_VERSION = 8
-SEGMENT_VERSION = 'library-7-regions-boundaries'
+SEGMENT_VERSION = 'library-8-table-captions'
 CATEGORIES = set('部令 各局处文件 货运 国际联运 客货运输 客、货运输 客运规章 货运规章 客货运管理 运营管理 客运管理 货运管理 货物运价 客货运运价 客货运价里程表 铁路专用线专用铁路名称表 法律文件 法规文件 法律法规 经济法规 价格管理 运输条件 客运运价 货运运价 其他 其它 客运 规章文件 运输组织 客货运输管理'.split())
 CATEGORIES.update(['国务院文件', '其他文件', '铁路运输企业管理', '运输收入', '综合管理'])
 # EU-BZ's embedded ToUnicode table substitutes these Han characters for digits and Latin glyphs.
@@ -31,6 +31,16 @@ EU_GLYPHS.update({'摇': '', '郾': '.', '援': '.', '辕': '/', '鄄': '-', '�
 ATTACHMENT = re.compile(r'^(?:附件|附表|附录)(?:第?[一二三四五六七八九十百\d]+(?:[.之][\d]+)*(?:号)?)?[:：]?$')
 REFERENCE = re.compile(r'(?:[\u4e00-\u9fff]{0,16}[〔(\[]\d{2,4}[〕)\]][\u4e00-\u9fff]{0,12}(?:字第)?\d+号|[\u4e00-\u9fff]{2,16}字第\d+号|第[一二三四五六七八九十百\d]+号)')
 STRUCTURAL_HEADING = re.compile(r'^第[一二三四五六七八九十百千万0-9]+[编篇章节条]')
+
+
+def source_reference(source, output):
+    """Use portable relative links in the project and file URIs elsewhere."""
+    source = Path(source).resolve()
+    try:
+        relative = source.relative_to(Path(output).resolve().parent)
+    except ValueError:
+        return source.as_uri()
+    return '../' + relative.as_posix()
 
 
 def attachment_label(line):
@@ -73,6 +83,27 @@ def title_font(line):
 
 def bold_font(line):
     return title_font(line) or 'HT' in line['fonts'] or '黑体' in line['fonts']
+
+
+def isolated_bookmaker_fonts(raw):
+    """Find sparse, individual encoded glyphs amid otherwise readable text.
+
+    Some standard tables use an embedded font for only a missing-value dash.
+    That must not turn a whole grid into a layout fallback. Long encoded runs
+    still require the original layout because their source text is unreliable.
+    """
+    spans = [span for block in raw['blocks'] for line in block.get('lines', []) for span in line['spans']]
+    normal_han = sum(len(re.findall(r'[\u4e00-\u9fff]', ''.join(char['c'] for char in span['chars'])))
+                     for span in spans if 'BookMaker' not in span['font'])
+    if normal_han < 20:
+        return set()
+    encoded = collections.defaultdict(list)
+    for span in spans:
+        if 'BookMaker' in span['font']:
+            encoded[span['font']].append(norm(''.join(char['c'] for char in span['chars'])))
+    return {font for font, runs in encoded.items()
+            if max(map(len, runs), default=0) <= 2 and sum(map(len, runs)) <= max(8, normal_han // 2)
+            and len(set(''.join(runs))) <= 3 and not re.search(r'[\u4e00-\u9fff]', ''.join(runs))}
 
 
 SIGNOFF_DATE = re.compile(r'^[（(]?([一二三四五六七八九〇○零O0-9]{4})年([一二三四五六七八九十0-9]{1,3})月([一二三四五六七八九十0-9]{1,3})日[）)]?$')
@@ -296,6 +327,66 @@ def attachment_title(pages, page_index, line_index):
     return ''.join(title) or None
 
 
+def attachment_caption_title(page, title, coordinates=None, start=0):
+    """Separate a printed table caption from its right-hand station range.
+
+    MuPDF can put a centred bold caption and the following, smaller station
+    range into one raw text line. Keep the source characters and offsets intact;
+    only the catalogue title changes after both content and layout agree.
+    """
+    match = re.fullmatch(r'(.{3,90}?表)([\u4e00-\u9fff\da-zA-Z·()（）]{1,45}[—－–―-]+'
+                         r'[\u4e00-\u9fff\da-zA-Z·()（）]{1,45})', title)
+    if not match:
+        return title
+    caption, scope = match.groups()
+    endpoints = re.split(r'[—－–―-]+', scope)
+    if not all(re.search(r'[\u4e00-\u9fff]', endpoint) for endpoint in endpoints):
+        return title  # A form number such as (DDB—1) is part of its caption.
+    position = page['t'].find(title, start)
+    if position < 0:
+        return title
+    split, end = position + len(caption), position + len(title)
+    def style_at(offset):
+        return next((style[1] for style in reversed(page.get('styles', [])) if style[0] <= offset), 0)
+    font_change = bool(style_at(split - 1) & 1) and not bool(style_at(split) & 1)
+    if coordinates is None or end > len(coordinates):
+        return caption if font_change else title
+    def rect(boxes):
+        return (min(box[0] for box in boxes), min(box[1] for box in boxes),
+                max(box[0] + box[2] for box in boxes), max(box[1] + box[3] for box in boxes))
+    main_boxes, scope_boxes = coordinates[position:split], coordinates[split:end]
+    main, note = rect(main_boxes), rect(scope_boxes)
+    main_row = sorted(box[1] for box in main_boxes[-6:])[len(main_boxes[-6:]) // 2]
+    note_row = sorted(box[1] for box in scope_boxes)[len(scope_boxes) // 2]
+    size = min(sorted(box[3] for box in main_boxes)[len(main_boxes) // 2],
+               sorted(box[3] for box in scope_boxes)[len(scope_boxes) // 2])
+    right_note = (note[0] > main[0] + 1 and (note[0] + note[2]) / 2 > 55
+                  and note[2] >= main[2] - size * .75)
+    separate_row = note_row >= main_row + size * .2
+    return caption if right_note and (separate_row or font_change) else title
+
+
+def axis_aligned_quad(item, tolerance=.6):
+    """Return a rectangle for a PDF quad whose four corners follow the axes."""
+    if item[0] != 'qu':
+        return None
+    quad = item[1]
+    points = [quad.ul, quad.ur, quad.ll, quad.lr]
+    rect = pymupdf.Rect(min(point.x for point in points), min(point.y for point in points),
+                        max(point.x for point in points), max(point.y for point in points))
+    if rect.is_empty:
+        return None
+    corners = set()
+    for point in points:
+        x = min((0, 1), key=lambda side: abs(point.x - (rect.x0 if side == 0 else rect.x1)))
+        y = min((0, 1), key=lambda side: abs(point.y - (rect.y0 if side == 0 else rect.y1)))
+        if (abs(point.x - (rect.x0 if x == 0 else rect.x1)) > tolerance or
+                abs(point.y - (rect.y0 if y == 0 else rect.y1)) > tolerance):
+            return None
+        corners.add((x, y))
+    return rect if len(corners) == 4 else None
+
+
 def closed_rule_regions(paths):
     """Closed straight-rule grids, used only to reject weak table-cell headings."""
     lines = []
@@ -362,6 +453,22 @@ def segment_document(layout, source, output):
     support = support_pages(pages)
     candidates, warnings = [], []
     grid_cache = {}
+    caption_coordinate_cache = {}
+
+    def caption_coordinates(page_index):
+        if page_index not in caption_coordinate_cache:
+            folder = Path(output) / 'data' / ident
+            coordinate_file = folder / f'{page_index + 1}.coords.js'
+            asset = folder / f'{page_index + 1}.page.js'
+            if coordinate_file.is_file():
+                encoded = coordinate_file.read_text(encoding='utf8').split(';\n', 1)[0].split('=', 1)[1]
+                caption_coordinate_cache[page_index] = json.loads(encoded)
+            elif asset.is_file():
+                encoded, _ = read_page_asset(asset, f'{ident}:{page_index}')
+                caption_coordinate_cache[page_index] = json.loads(encoded)
+            else:
+                caption_coordinate_cache[page_index] = None
+        return caption_coordinate_cache[page_index]
 
     def table_body_heading(group, page_index):
         if page_index not in grid_cache:
@@ -382,6 +489,10 @@ def segment_document(layout, source, output):
                                 paths.append(f'M{a.x},{a.y}L{b.x},{b.y}')
                             elif item[0] == 're':
                                 rect = item[1] * original.rotation_matrix if original.rotation else item[1]
+                                paths.append(f'M{rect.x0},{rect.y0}h{rect.width}v{rect.height}h{-rect.width}Z')
+                            elif (rect := axis_aligned_quad(item)) is not None:
+                                if original.rotation:
+                                    rect *= original.rotation_matrix
                                 paths.append(f'M{rect.x0},{rect.y0}h{rect.width}v{rect.height}h{-rect.width}Z')
             grid_cache[page_index] = closed_rule_regions(paths)
         left, top = min(line['x'] for line in group), min(line['y'] for line in group)
@@ -690,6 +801,9 @@ def segment_document(layout, source, output):
         entry = dict(candidate, id=f'{ident}-{len(entries)}', parts=parts,
                      number=candidate.get('reference') or (number[0] if number else ''), topic=classify(candidate['title'], candidate['category']))
         entry['title'] = heading_text(entry['title'])
+        if entry['kind'] == '附件' and re.search(r'表.+[—－–―-]', entry['title']):
+            entry['title'] = attachment_caption_title(pages[entry['p']], entry['title'],
+                                                       caption_coordinates(entry['p']), entry['a'])
         # Some facing-page tables print their caption across the two halves.
         if (entry['kind'] == '附件' and entry['title'].endswith('直通') and len(parts) > 1
                 and parts[1]['p'] == parts[0]['p'] + 1):
@@ -790,7 +904,7 @@ def segment_document(layout, source, output):
     for i, page in enumerate(pages):
         if len(page['t']) < 20 and page['images'] and i not in support:
             warnings.append(dict(type='图像页文字较少', page=i + 1, title=page['t'][:50]))
-    return dict(id=ident, file=layout['file'], digest=layout['digest'], source='../' + Path(source).relative_to(Path(output).parent).as_posix(),
+    return dict(id=ident, file=layout['file'], digest=layout['digest'], source=source_reference(source, output),
                 year=year, issue=issue, issueOrder=issue_order, pages=len(pages),
                 sizes=[[page['w'], page['h']] for page in pages], texts=[page['t'] for page in pages],
                 labels=[page_label(page) for page in pages], entries=entries, warnings=warnings)
@@ -1200,6 +1314,9 @@ def reading_media_regions(page, data, drawings, boxes, display):
             elif item[0] == 're':
                 horizontal += 2
                 vertical += 2
+            elif axis_aligned_quad(item) is not None:
+                horizontal += 2
+                vertical += 2
             else:
                 complex_shape = True
         rect = pymupdf.Rect(drawing['rect']) & bounds
@@ -1266,9 +1383,12 @@ def reading_media_regions(page, data, drawings, boxes, display):
     # treated this way. Ordinary Korean/Russian international-traffic text stays text.
     raw = page.get_text('rawdict', flags=pymupdf.TEXTFLAGS_RAWDICT & ~pymupdf.TEXT_PRESERVE_IMAGES)
     bad_glyph_boxes = []
+    encoded_glyphs = []
     encoded_boxes = []
+    individual_fonts = isolated_bookmaker_fonts(raw)
     glyph_positions = collections.defaultdict(list)
     glyph_origins = collections.defaultdict(list)
+    encoded_origins = collections.defaultdict(list)
     for offset, box in enumerate(coordinates):
         glyph_positions[(round(box.x0), round(box.y0))].append(offset)
     for block in raw['blocks']:
@@ -1289,7 +1409,12 @@ def reading_media_regions(page, data, drawings, boxes, display):
                                         and max(abs(a - b) for a, b in zip(coordinates[offset], glyph)) < .06):
                                     origin = char['origin']
                                     glyph_origins[(round(origin[0]), round(origin[1]), value)].append((offset, origin))
+                                    if span['font'] in individual_fonts:
+                                        encoded_glyphs.append((glyph, offset))
+                                        encoded_origins[(round(origin[0]), round(origin[1]))].append((offset, origin))
                 if 'BookMaker' in span['font']:
+                    if span['font'] in individual_fonts:
+                        continue
                     rect = pymupdf.Rect(span['bbox']) & bounds
                     grid = next((grid for grid in grids if rect in grid), None)
                     encoded_boxes.append(grid or rect)
@@ -1424,7 +1549,13 @@ def reading_media_regions(page, data, drawings, boxes, display):
                 ox, oy = numbers[4:]
                 for dx in (-1, 0, 1):
                     for dy in (-1, 0, 1):
-                        for offset, origin in glyph_origins.get((round(ox) + dx, round(oy) + dy, value), []):
+                        matches = glyph_origins.get((round(ox) + dx, round(oy) + dy, value), [])
+                        # SVG export labels an unmapped embedded glyph U+FFFD
+                        # even when text extraction calls it "!". Only a known
+                        # isolated encoded glyph may use this origin-only match.
+                        if value == '\ufffd':
+                            matches = [*matches, *encoded_origins.get((round(ox) + dx, round(oy) + dy), [])]
+                        for offset, origin in matches:
                             if abs(origin[0] - ox) > .06 or abs(origin[1] - oy) > .06:
                                 continue
                             attributes = {key: val for key, val in target.attrib.items() if key != 'id'}
@@ -1535,6 +1666,14 @@ def reading_media_regions(page, data, drawings, boxes, display):
     for rect, offsets in composites:
         if not any(rect in figure for figure in figures):
             add('symbol', rect, offsets, vector=True)
+    for rect, offset in encoded_glyphs:
+        if rect.width < .2 or rect.height < .2:
+            # An embedded font may advertise zero advance for a visible glyph.
+            # Its explicit source identity is already known; a temporary shell
+            # lets vector_symbol measure the actual path before validating it.
+            rect = pymupdf.Rect(rect.x0 - .5, rect.y0 - .5, rect.x1 + .5, rect.y1 + .5)
+        if not any(rect in figure for figure in figures):
+            add('symbol', rect, [offset], vector=True)
     for rect, offset in bad_glyph_boxes:
         if any(rect in figure for figure in figures):
             continue
@@ -1587,7 +1726,7 @@ def render_document(source, output, layout=None):
     if layout is None:
         layout = extract_document(source, output)
     folder = output / 'data' / layout['id']
-    spec = dict(digest=layout['digest'], format='html-text-18', pages=len(layout['pages']))
+    spec = dict(digest=layout['digest'], format='html-text-20', pages=len(layout['pages']))
     manifest = folder / 'html.json'
     saved = json.loads(manifest.read_text()) if manifest.exists() else {}
     same_render = all(saved.get(key) == value for key, value in spec.items())
@@ -1608,34 +1747,6 @@ def render_document(source, output, layout=None):
             write_page_asset(path, key, coords, markup)
         atomic_text(manifest, json.dumps(dict(spec, mediaPages=sorted(media_pages))))
         return source.name, len(paths), round(time.monotonic() - started, 1)
-    if (complete and saved.get('format') in ['html-text-12', 'html-text-13', 'html-text-14', 'html-text-15', 'html-text-16', 'html-text-17']
-            and saved.get('digest') == spec['digest'] and saved.get('pages') == spec['pages']):
-        # These versions only tighten symbol/text identity. Pages without a
-        # symbol region, their text/rules and all original rasters are unchanged.
-        changed = 0
-        with pymupdf.open(source) as pdf:
-            for i, path in enumerate(paths):
-                key = f'{layout["id"]}:{i}'
-                coords, markup = read_page_asset(path, key)
-                attribute = re.search(r' data-regions="([^"]*)"', markup)
-                if not attribute or not any(region['kind'] == 'symbol' for region in
-                        json.loads(html.unescape(attribute[1]))):
-                    continue
-                page, data = pdf[i], layout['pages'][i]
-                display = data.get('display')
-                if display is None:
-                    display = readpage(page)[0]['display']
-                if display.lower() != data['t']:
-                    display = data['t']
-                _, regions = reading_media_regions(page, data, page.get_drawings(), json.loads(coords), display)
-                replacement = (' data-regions="' + html.escape(json.dumps(regions, ensure_ascii=False,
-                    separators=(',', ':')), quote=True) + '"') if regions else ''
-                updated = markup[:attribute.start()] + replacement + markup[attribute.end():]
-                if updated != markup:
-                    write_page_asset(path, key, coords, updated)
-                    changed += 1
-        atomic_text(manifest, json.dumps(dict(spec, mediaPages=saved.get('mediaPages', []))))
-        return source.name, changed, round(time.monotonic() - started, 1)
     rendered=0
     with pymupdf.open(source) as pdf:
         for i, page in enumerate(pdf):
@@ -1671,6 +1782,8 @@ def render_document(source, output, layout=None):
                         commands.append(f'M{a.x:.2f},{a.y:.2f}L{b.x:.2f},{b.y:.2f}')
                     elif item[0] == 're':
                         r=item[1]; commands.append(f'M{r.x0:.2f},{r.y0:.2f}h{r.width:.2f}v{r.height:.2f}h{-r.width:.2f}Z')
+                    elif (r := axis_aligned_quad(item)) is not None:
+                        commands.append(f'M{r.x0:.2f},{r.y0:.2f}h{r.width:.2f}v{r.height:.2f}h{-r.width:.2f}Z')
                 if commands:
                     elements.append('<path d="'+''.join(commands)+'" fill="none" stroke="#555" stroke-width="'+str(max(.2,drawing.get('width') or .3))+'"/>')
             styles = iter(data['styles'])
